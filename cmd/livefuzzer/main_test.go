@@ -25,11 +25,13 @@ func TestInitAppRegistersCampaignAndReplayCommands(t *testing.T) {
 		}
 		if cmd.Name == "campaign" {
 			seenCampaign = true
-			if len(cmd.Subcommands) != 1 || cmd.Subcommands[0].Name != "basic" {
-				t.Fatalf("unexpected campaign subcommands: %#v", cmd.Subcommands)
+			if len(cmd.Subcommands) != 3 {
+				t.Fatalf("unexpected campaign subcommand count: %d", len(cmd.Subcommands))
 			}
-			if got := len(cmd.Subcommands[0].Flags); got != len(flags.CampaignFlags) {
-				t.Fatalf("campaign basic flags mismatch: got=%d want=%d", got, len(flags.CampaignFlags))
+			for _, sub := range cmd.Subcommands {
+				if got := len(sub.Flags); got != len(flags.CampaignFlags) {
+					t.Fatalf("campaign %s flags mismatch: got=%d want=%d", sub.Name, got, len(flags.CampaignFlags))
+				}
 			}
 		}
 		if cmd.Name == "replay" {
@@ -52,4 +54,24 @@ func TestInitAppRegistersCampaignAndReplayCommands(t *testing.T) {
 	if !seenCampaign || !seenReplay {
 		t.Fatalf("expected campaign and replay commands, got campaign=%v replay=%v", seenCampaign, seenReplay)
 	}
+}
+
+func TestCampaignCommandRegistersAllFamilies(t *testing.T) {
+	app := initApp()
+	for _, cmd := range app.Commands {
+		if cmd.Name != "campaign" {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, sub := range cmd.Subcommands {
+			seen[sub.Name] = true
+		}
+		for _, want := range []string{"basic", "blob", "pectra"} {
+			if !seen[want] {
+				t.Fatalf("campaign missing %s subcommand: %#v", want, seen)
+			}
+		}
+		return
+	}
+	t.Fatal("campaign command not found")
 }

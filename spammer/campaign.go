@@ -2,6 +2,7 @@ package spammer
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"fmt"
 	"math/big"
@@ -19,17 +20,20 @@ import (
 	"github.com/MariusVanDerWijden/tx-fuzz/replay"
 	"github.com/MariusVanDerWijden/tx-fuzz/runner"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/holiman/uint256"
 	"github.com/urfave/cli/v2"
 )
 
 type CampaignOptions struct {
 	CampaignID     string
 	Cases          int
+	TxFamily       string
 	ForkLabel      string
 	ArtifactRoot   string
 	RetainDir      string
@@ -41,13 +45,26 @@ type CampaignOptions struct {
 }
 
 func RunBasicCampaignFromContext(c *cli.Context) error {
+	return RunCampaignFamilyFromContext(c, "basic")
+}
+
+func RunBlobCampaignFromContext(c *cli.Context) error {
+	return RunCampaignFamilyFromContext(c, "blob")
+}
+
+func RunPectraCampaignFromContext(c *cli.Context) error {
+	return RunCampaignFamilyFromContext(c, "pectra")
+}
+
+func RunCampaignFamilyFromContext(c *cli.Context, family string) error {
 	config, err := NewConfigFromContext(c)
 	if err != nil {
 		return err
 	}
-	return RunBasicCampaign(config, CampaignOptions{
+	return RunCampaign(config, CampaignOptions{
 		CampaignID:     c.String(flags.CampaignIDFlag.Name),
 		Cases:          c.Int(flags.CasesFlag.Name),
+		TxFamily:       family,
 		ForkLabel:      c.String(flags.ForkLabelFlag.Name),
 		ArtifactRoot:   c.String(flags.ArtifactRootFlag.Name),
 		RetainDir:      c.String(flags.RetainDirFlag.Name),
@@ -60,14 +77,28 @@ func RunBasicCampaignFromContext(c *cli.Context) error {
 }
 
 func RunBasicCampaign(config *Config, opts CampaignOptions) error {
+	if opts.TxFamily == "" {
+		opts.TxFamily = "basic"
+	}
+	return RunCampaign(config, opts)
+}
+
+func RunCampaign(config *Config, opts CampaignOptions) error {
 	if opts.CampaignID == "" {
 		opts.CampaignID = runner.NewCampaignID()
 	}
 	if opts.Cases <= 0 {
 		opts.Cases = 1
 	}
+	if opts.TxFamily == "" {
+		opts.TxFamily = "basic"
+	}
 	if opts.ForkLabel == "" {
-		opts.ForkLabel = "cancun"
+		if opts.TxFamily == "pectra" {
+			opts.ForkLabel = "prague"
+		} else {
+			opts.ForkLabel = "cancun"
+		}
 	}
 	if opts.RPCLabel == "" {
 		opts.RPCLabel = "default-rpc"
@@ -84,8 +115,8 @@ func RunBasicCampaign(config *Config, opts CampaignOptions) error {
 	if err != nil {
 		return err
 	}
-	builder := &basicCampaignBuilder{config: config, client: client, chainID: chainID, options: opts}
-	submitter := &basicCampaignSubmitter{client: client, rpcLabel: opts.RPCLabel, receiptTimeout: opts.ReceiptTimeout}
+	builder := &campaignBuilder{config: config, client: client, chainID: chainID, options: opts}
+	submitter := &campaignSubmitter{client: client, rpcLabel: opts.RPCLabel, receiptTimeout: opts.ReceiptTimeout}
 	sink := &campaignSink{
 		artifactRoot: opts.ArtifactRoot,
 		replayDir:    opts.ReplayDir,
@@ -94,7 +125,7 @@ func RunBasicCampaign(config *Config, opts CampaignOptions) error {
 	stats, err := runner.RunCampaign(context.Background(), runner.Config{
 		CampaignID: opts.CampaignID,
 		Cases:      opts.Cases,
-		TxFamily:   "basic",
+		TxFamily:   opts.TxFamily,
 		ForkLabel:  opts.ForkLabel,
 	}, builder, submitter, sink)
 	if err != nil {
@@ -103,14 +134,14 @@ func RunBasicCampaign(config *Config, opts CampaignOptions) error {
 	return runner.WriteReport(opts.ReportJSON, stats)
 }
 
-type basicCampaignBuilder struct {
+type campaignBuilder struct {
 	config  *Config
 	client  *ethclient.Client
 	chainID *big.Int
 	options CampaignOptions
 }
 
-func (b *basicCampaignBuilder) Build(ctx context.Context, sequence int) (*runner.Case, error) {
+func (b *campaignBuilder) Build(ctx context.Context, sequence int) (*runner.Case, error) {
 	key := b.config.faucet
 	if len(b.config.keys) > 0 {
 		key = b.config.keys[(sequence-1)%len(b.config.keys)]
@@ -121,11 +152,11 @@ func (b *basicCampaignBuilder) Build(ctx context.Context, sequence int) (*runner
 		return nil, err
 	}
 	fill, mutation, corpusRef, sourceKind := buildCampaignFiller(b.config)
-	tx, err := txfuzz.RandomValidTx(b.config.backend, fill, sender, nonce, nil, nil, b.config.accessList)
+	tx, auths, signer, family, err := buildCampaignTx(ctx, b.config, b.client, b.chainID, b.options.TxFamily, key, sender, nonce, fill, sequence)
 	if err != nil {
 		return nil, err
 	}
-	signedTx, err := types.SignTx(tx, types.NewCancunSigner(b.chainID), key)
+	signedTx, err := types.SignTx(tx, signer, key)
 	if err != nil {
 		return nil, err
 	}
@@ -133,40 +164,99 @@ func (b *basicCampaignBuilder) Build(ctx context.Context, sequence int) (*runner
 	if err != nil {
 		return nil, err
 	}
+	feeFieldMap := feeFields(signedTx)
+	record := runner.TestcaseRecord{
+		CaseID:            runner.NewCaseID(sequence),
+		CampaignID:        b.options.CampaignID,
+		RunStartedAt:      time.Now().UTC(),
+		Sequence:          sequence,
+		TxFamily:          family,
+		ForkLabel:         b.options.ForkLabel,
+		SourceKind:        sourceKind,
+		Seed:              b.config.seed,
+		CorpusInputRef:    corpusRef,
+		Sender:            sender.Hex(),
+		Nonce:             signedTx.Nonce(),
+		GasLimit:          signedTx.Gas(),
+		AccessListEnabled: b.config.accessList,
+		ValueWei:          signedTx.Value().String(),
+		FeeFields:         feeFieldMap,
+		Mutation:          mutation,
+		UnsignedSummary:   summarizeTx(signedTx),
+		SignedTxHex:       hexutil.Encode(rawTx),
+		SignedTxHash:      signedTx.Hash().Hex(),
+	}
+	applyFamilyMetadata(family, feeFieldMap, signedTx, &record, auths)
 	return &runner.Case{
-		Record: runner.TestcaseRecord{
-			CaseID:            runner.NewCaseID(sequence),
-			CampaignID:        b.options.CampaignID,
-			RunStartedAt:      time.Now().UTC(),
-			Sequence:          sequence,
-			TxFamily:          "basic",
-			ForkLabel:         b.options.ForkLabel,
-			SourceKind:        sourceKind,
-			Seed:              b.config.seed,
-			CorpusInputRef:    corpusRef,
-			Sender:            sender.Hex(),
-			Nonce:             signedTx.Nonce(),
-			GasLimit:          signedTx.Gas(),
-			AccessListEnabled: b.config.accessList,
-			ValueWei:          signedTx.Value().String(),
-			FeeFields:         feeFields(signedTx),
-			Mutation:          mutation,
-			UnsignedSummary:   summarizeTx(signedTx),
-			SignedTxHex:       hexutil.Encode(rawTx),
-			SignedTxHash:      signedTx.Hash().Hex(),
-		},
-		Tx:    signedTx,
-		RawTx: rawTx,
+		Record: record,
+		Tx:     signedTx,
+		RawTx:  rawTx,
 	}, nil
 }
 
-type basicCampaignSubmitter struct {
+func buildCampaignTx(ctx context.Context, config *Config, client *ethclient.Client, chainID *big.Int, family string, _ *ecdsa.PrivateKey, sender common.Address, nonce uint64, fill *filler.Filler, sequence int) (*types.Transaction, []types.SetCodeAuthorization, types.Signer, string, error) {
+	switch family {
+	case "", "basic":
+		tx, err := txfuzz.RandomValidTx(config.backend, fill, sender, nonce, nil, nil, config.accessList)
+		return tx, nil, types.NewCancunSigner(chainID), "basic", err
+	case "blob":
+		tx, err := txfuzz.RandomBlobTx(config.backend, fill, sender, nonce, nil, nil, config.accessList)
+		return tx, nil, types.NewCancunSigner(chainID), "blob", err
+	case "pectra":
+		auths, err := buildSetCodeAuthorizations(ctx, config, client, chainID, sender, sequence)
+		if err != nil {
+			return nil, nil, nil, "pectra", err
+		}
+		tx, err := txfuzz.RandomAuthTx(config.backend, fill, sender, nonce, nil, nil, config.accessList, auths)
+		return tx, auths, types.NewPragueSigner(chainID), "pectra", err
+	default:
+		return nil, nil, nil, family, fmt.Errorf("unsupported campaign tx family: %s", family)
+	}
+}
+
+func buildSetCodeAuthorizations(ctx context.Context, config *Config, client *ethclient.Client, chainID *big.Int, sender common.Address, sequence int) ([]types.SetCodeAuthorization, error) {
+	if len(config.keys) == 0 {
+		return nil, fmt.Errorf("missing authorizer keys")
+	}
+	authorizer := config.keys[(sequence-1)%len(config.keys)]
+	authorizerAddr := crypto.PubkeyToAddress(authorizer.PublicKey)
+	nonceAuth, err := client.PendingNonceAt(ctx, authorizerAddr)
+	if err != nil {
+		return nil, err
+	}
+	auth := types.SetCodeAuthorization{ChainID: *uint256.MustFromBig(chainID), Address: sender, Nonce: nonceAuth}
+	auth, err = types.SignSetCode(authorizer, auth)
+	if err != nil {
+		return nil, err
+	}
+	return []types.SetCodeAuthorization{auth}, nil
+}
+
+func applyFamilyMetadata(family string, feeFieldMap map[string]string, tx *types.Transaction, record *runner.TestcaseRecord, auths []types.SetCodeAuthorization) {
+	if record == nil || tx == nil {
+		return
+	}
+	switch family {
+	case "blob":
+		record.BlobCount = len(tx.BlobHashes())
+		if blobFeeCap := tx.BlobGasFeeCap(); blobFeeCap != nil {
+			feeFieldMap["blob_fee_cap"] = blobFeeCap.String()
+		}
+	case "pectra":
+		if len(auths) == 0 {
+			auths = tx.SetCodeAuthorizations()
+		}
+		record.AuthorizationCount = len(auths)
+	}
+}
+
+type campaignSubmitter struct {
 	client         *ethclient.Client
 	rpcLabel       string
 	receiptTimeout time.Duration
 }
 
-func (s *basicCampaignSubmitter) Submit(ctx context.Context, c *runner.Case) (feedback.Record, error) {
+func (s *campaignSubmitter) Submit(ctx context.Context, c *runner.Case) (feedback.Record, error) {
 	start := time.Now().UTC()
 	record := feedback.Record{
 		CaseID:          c.Record.CaseID,
