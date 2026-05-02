@@ -4,3 +4,6 @@ cmd/shanghai/shanghai
 .idea
 AGENTS.md
 .omx
+livefuzzer
+/upgradePlan
+.local/

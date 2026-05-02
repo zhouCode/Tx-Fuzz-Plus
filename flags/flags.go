@@ -48,6 +48,12 @@ var (
 		Usage: "Execution client label to select from endpoints.json when --rpc is omitted",
 	}
 
+	AccountsFileFlag = &cli.StringFlag{
+		Name:  "accounts-file",
+		Usage: "Path to local funded-account inventory JSON used for sender/faucet selection",
+		Value: ".local/devnet-accounts.json",
+	}
+
 	RpcLabelFlag = &cli.StringFlag{
 		Name:  "rpc-label",
 		Usage: "Label used in feedback artifacts for the RPC target",
@@ -130,6 +136,7 @@ var (
 		SeedFlag,
 		NoALFlag,
 		CorpusFlag,
+		AccountsFileFlag,
 		RpcFlag,
 		EndpointsFlag,
 		ELClientFlag,
@@ -144,6 +151,7 @@ var (
 		SeedFlag,
 		NoALFlag,
 		CorpusFlag,
+		AccountsFileFlag,
 		RpcFlag,
 		EndpointsFlag,
 		ELClientFlag,

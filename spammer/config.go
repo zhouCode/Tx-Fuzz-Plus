@@ -6,10 +6,10 @@ import (
 	crand "crypto/rand"
 	"encoding/binary"
 	"fmt"
+	txfuzz "github.com/MariusVanDerWijden/tx-fuzz"
 	"math/rand"
 	"os"
 
-	txfuzz "github.com/MariusVanDerWijden/tx-fuzz"
 	"github.com/MariusVanDerWijden/tx-fuzz/flags"
 	"github.com/MariusVanDerWijden/tx-fuzz/mutator"
 	"github.com/ethereum/go-ethereum/common"
@@ -85,7 +85,14 @@ func NewConfigFromContext(c *cli.Context) (*Config, error) {
 	}
 
 	// Setup faucet
-	faucet := crypto.ToECDSAUnsafe(common.FromHex(txfuzz.SK))
+	nKeys := c.Int(flags.CountFlag.Name)
+	if nKeys == 0 {
+		nKeys = flags.CountFlag.Value
+	}
+	faucet, keys, _, err := resolveConfiguredAccounts(c.String(flags.AccountsFileFlag.Name), nKeys)
+	if err != nil {
+		return nil, err
+	}
 	if sk := c.String(flags.SkFlag.Name); sk != "" {
 		faucet, err = crypto.ToECDSA(common.FromHex(sk))
 		if err != nil {
@@ -94,14 +101,11 @@ func NewConfigFromContext(c *cli.Context) (*Config, error) {
 	}
 
 	// Setup Keys
-	var keys []*ecdsa.PrivateKey
-	nKeys := c.Int(flags.CountFlag.Name)
-	if nKeys == 0 || nKeys > len(staticKeys) {
-		fmt.Printf("Sanitizing count flag from %v to %v\n", nKeys, len(staticKeys))
-		nKeys = len(staticKeys)
+	if len(keys) == 0 {
+		keys = defaultKeyList(nKeys)
 	}
-	for i := 0; i < nKeys; i++ {
-		keys = append(keys, crypto.ToECDSAUnsafe(common.FromHex(staticKeys[i])))
+	if nKeys > len(keys) {
+		fmt.Printf("Sanitizing count flag from %v to %v\n", nKeys, len(keys))
 	}
 
 	// Setup gasLimit

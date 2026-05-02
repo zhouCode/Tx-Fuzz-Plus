@@ -18,6 +18,7 @@ var airdropCommand = &cli.Command{
 	Action: runAirdrop,
 	Flags: []cli.Flag{
 		flags.SkFlag,
+		flags.AccountsFileFlag,
 		flags.RpcFlag,
 		flags.EndpointsFlag,
 		flags.ELClientFlag,
