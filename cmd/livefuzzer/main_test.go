@@ -25,6 +25,12 @@ func TestInitAppRegistersCampaignAndReplayCommands(t *testing.T) {
 		}
 		if cmd.Name == "campaign" {
 			seenCampaign = true
+			if len(cmd.Subcommands) != 1 || cmd.Subcommands[0].Name != "basic" {
+				t.Fatalf("unexpected campaign subcommands: %#v", cmd.Subcommands)
+			}
+			if got := len(cmd.Subcommands[0].Flags); got != len(flags.CampaignFlags) {
+				t.Fatalf("campaign basic flags mismatch: got=%d want=%d", got, len(flags.CampaignFlags))
+			}
 		}
 		if cmd.Name == "replay" {
 			seenReplay = true

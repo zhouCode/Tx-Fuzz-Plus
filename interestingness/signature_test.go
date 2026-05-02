@@ -44,3 +44,16 @@ func TestReceiptAndErrorSignaturesDoNotCollide(t *testing.T) {
 		t.Fatalf("expected distinct signature keys")
 	}
 }
+
+func TestSignatureIncludesTxFamilyAndForkLabel(t *testing.T) {
+	rec := feedback.Record{SendStatus: "rpc_error", RPCErrorClass: "nonce_too_low", RPCErrorMessage: "nonce too low 0xabc 7"}
+	basic := SignatureForFeedback("basic", "cancun", rec)
+	blob := SignatureForFeedback("blob", "cancun", rec)
+	prague := SignatureForFeedback("blob", "prague", rec)
+	if basic.StableKey == blob.StableKey {
+		t.Fatalf("expected tx family to affect stable key")
+	}
+	if blob.StableKey == prague.StableKey {
+		t.Fatalf("expected fork label to affect stable key")
+	}
+}
