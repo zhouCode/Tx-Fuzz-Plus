@@ -58,3 +58,28 @@ func TestTestcaseRecordJSONRoundTrip(t *testing.T) {
 		t.Fatalf("mutation not preserved: %#v", got.Mutation)
 	}
 }
+
+func TestTestcaseRecordJSONRoundTripPreservesFamilyFields(t *testing.T) {
+	record := TestcaseRecord{
+		CaseID:             "case-family",
+		TxFamily:           "blob",
+		ForkLabel:          "cancun",
+		BlobCount:          2,
+		AuthorizationCount: 1,
+		FeeFields:          map[string]string{"blob_fee_cap": "123", "gas_fee_cap": "456"},
+	}
+	blob, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("marshal testcase: %v", err)
+	}
+	var got TestcaseRecord
+	if err := json.Unmarshal(blob, &got); err != nil {
+		t.Fatalf("unmarshal testcase: %v", err)
+	}
+	if got.BlobCount != 2 || got.AuthorizationCount != 1 {
+		t.Fatalf("family fields not preserved: %#v", got)
+	}
+	if got.FeeFields["blob_fee_cap"] != "123" {
+		t.Fatalf("expected blob fee field, got %#v", got.FeeFields)
+	}
+}

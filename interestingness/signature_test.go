@@ -44,3 +44,20 @@ func TestReceiptAndErrorSignaturesDoNotCollide(t *testing.T) {
 		t.Fatalf("expected distinct signature keys")
 	}
 }
+
+func TestNormalizeBlobAndAuthErrorsKeepDistinctFamilies(t *testing.T) {
+	rec := feedback.Record{
+		CaseID:          "same",
+		SendStatus:      "rpc_error",
+		RPCErrorClass:   "insufficient_funds",
+		RPCErrorMessage: "blob transaction rejected: insufficient funds for 0xabc tx 0xdef",
+	}
+	blobSig := SignatureForFeedback("blob", "cancun", rec)
+	authSig := SignatureForFeedback("pectra", "prague", rec)
+	if blobSig.StableKey == authSig.StableKey {
+		t.Fatalf("expected family/fork aware signatures to differ")
+	}
+	if blobSig.SignatureKind != "rpc_error" || authSig.SignatureKind != "rpc_error" {
+		t.Fatalf("expected rpc_error signatures, got blob=%s auth=%s", blobSig.SignatureKind, authSig.SignatureKind)
+	}
+}
