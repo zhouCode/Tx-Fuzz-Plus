@@ -45,22 +45,28 @@ func TestExportBundleWritesBundleAndRawTx(t *testing.T) {
 	}
 }
 
-func TestExportBundlePreservesFamilyMetadata(t *testing.T) {
+func TestExportBundlePreservesFamilyMetadataAndEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	retained := runner.RetainedCase{
 		Case: runner.TestcaseRecord{
-			CaseID:             "case-family",
-			CampaignID:         "campaign-family",
-			TxFamily:           "pectra",
-			ForkLabel:          "prague",
+			CaseID:             "case-blob-1",
+			CampaignID:         "campaign-blob",
+			TxFamily:           "blob",
+			ForkLabel:          "cancun",
+			BlobCount:          2,
 			AuthorizationCount: 1,
-			SignedTxHex:        "0x",
+			SignedTxHex:        "0x01",
 		},
-		Feedback:   feedback.Record{CaseID: "case-family", SendStatus: "sent"},
-		Signature:  interestingness.SignatureRecord{StableKey: "sig-family", SignatureKind: "receipt"},
-		RetainedAt: time.Unix(1700000005, 0).UTC(),
+		Feedback:   feedback.Record{CaseID: "case-blob-1", SendStatus: "sent"},
+		Signature:  interestingness.SignatureRecord{StableKey: "sig-blob", SignatureKind: "receipt"},
+		RetainedAt: time.Unix(1700000004, 0).UTC(),
 	}
-	bundlePath, err := ExportBundle(dir, retained, EnvironmentSpec{ClientLabel: "local", ForkLabel: "prague"})
+	bundlePath, err := ExportBundle(dir, retained, EnvironmentSpec{
+		RPCURL:      "http://127.0.0.1:8545",
+		ClientLabel: "reth",
+		ForkLabel:   "cancun",
+		ChainID:     "1",
+	})
 	if err != nil {
 		t.Fatalf("export bundle: %v", err)
 	}
@@ -68,7 +74,10 @@ func TestExportBundlePreservesFamilyMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load bundle: %v", err)
 	}
-	if bundle.Case.TxFamily != "pectra" || bundle.Case.AuthorizationCount != 1 {
+	if bundle.Case.TxFamily != "blob" || bundle.Case.BlobCount != 2 || bundle.Case.AuthorizationCount != 1 {
 		t.Fatalf("family metadata not preserved: %#v", bundle.Case)
+	}
+	if bundle.Environment.RPCURL != "http://127.0.0.1:8545" || bundle.Environment.ClientLabel != "reth" || bundle.Environment.ChainID != "1" {
+		t.Fatalf("environment not preserved: %#v", bundle.Environment)
 	}
 }
