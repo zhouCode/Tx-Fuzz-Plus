@@ -9,6 +9,7 @@ import (
 
 	"github.com/MariusVanDerWijden/FuzzyVM/filler"
 	txfuzz "github.com/MariusVanDerWijden/tx-fuzz"
+	"github.com/MariusVanDerWijden/tx-fuzz/spammer"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -151,7 +152,11 @@ func GetRealBackend() (*rpc.Client, *ecdsa.PrivateKey) {
 	if crypto.PubkeyToAddress(sk.PublicKey).Hex() != txfuzz.ADDR {
 		panic(fmt.Sprintf("wrong address want %s got %s", crypto.PubkeyToAddress(sk.PublicKey).Hex(), txfuzz.ADDR))
 	}
-	cl, err := rpc.Dial(txfuzz.RPC)
+	resolved, err := spammer.ResolveEndpointSelection("", "", "", "")
+	if err != nil {
+		panic(err)
+	}
+	cl, err := rpc.Dial(resolved.RPCURL)
 	if err != nil {
 		panic(err)
 	}

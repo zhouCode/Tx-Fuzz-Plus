@@ -1,9 +1,23 @@
 package main
 
 import (
+	"fmt"
+
+	"github.com/MariusVanDerWijden/tx-fuzz/helper"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/core/vm/program"
 )
+
+func main() {
+	fmt.Println("selfdestruct")
+	if err := helper.Execute(Selfdestructor(), 5_000_000); err != nil {
+		panic(err)
+	}
+	fmt.Println("ef-byte")
+	if err := helper.Execute(EfByte(), 5_000_000); err != nil {
+		panic(err)
+	}
+}
 
 func Selfdestructor() []byte {
 	selfdestructTo := []byte{
@@ -26,15 +40,11 @@ func Selfdestructor() []byte {
 	Create(program, selfdestructTo, true, false)
 	program.Op(vm.POP)
 	Create(program, initcode.Bytes(), true, false)
-	//program.CreateAndCall(initcode.Bytecode(), true, ops.STATICCALL)
-	//program.CreateAndCall(initcode.Bytecode(), true, ops.DELEGATECALL)
 	return program.Bytes()
 }
 
 func EfByte() []byte {
-	inner := []byte{
-		0xEF,
-	}
+	inner := []byte{0xEF}
 
 	initcode := program.New()
 	initcode.Mstore(inner, 0)
@@ -56,11 +66,9 @@ func Create(p *program.Program, code []byte, inMemory bool, isCreate2 bool) {
 		salt     = 0
 		createOp = vm.CREATE
 	)
-	// Load the code into mem
 	if !inMemory {
 		p.Mstore(code, 0)
 	}
-	// Create it
 	if isCreate2 {
 		p.Push(salt)
 		createOp = vm.CREATE2

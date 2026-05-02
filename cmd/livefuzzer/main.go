@@ -19,6 +19,11 @@ var airdropCommand = &cli.Command{
 	Flags: []cli.Flag{
 		flags.SkFlag,
 		flags.RpcFlag,
+		flags.EndpointsFlag,
+		flags.ELClientFlag,
+		flags.CountFlag,
+		flags.TxCountFlag,
+		flags.GasLimitFlag,
 	},
 }
 
@@ -41,6 +46,32 @@ var pectraSpamCommand = &cli.Command{
 	Usage:  "Send 7702 spam transactions",
 	Action: run7702Spam,
 	Flags:  flags.SpamFlags,
+}
+
+var campaignCommand = &cli.Command{
+	Name:  "campaign",
+	Usage: "Run a bounded artifact-producing fuzz campaign",
+	Subcommands: []*cli.Command{
+		{
+			Name:   "basic",
+			Usage:  "Run a bounded basic transaction campaign",
+			Action: runBasicCampaign,
+			Flags:  flags.CampaignFlags,
+		},
+	},
+}
+
+var replayCommand = &cli.Command{
+	Name:   "replay",
+	Usage:  "Replay a retained bundle",
+	Action: runReplay,
+	Flags: []cli.Flag{
+		flags.BundleFlag,
+		flags.RpcFlag,
+		flags.EndpointsFlag,
+		flags.ELClientFlag,
+		flags.RpcLabelFlag,
+	},
 }
 
 var createCommand = &cli.Command{
@@ -69,6 +100,8 @@ func initApp() *cli.App {
 		spamCommand,
 		blobSpamCommand,
 		pectraSpamCommand,
+		campaignCommand,
+		replayCommand,
 		createCommand,
 		unstuckCommand,
 	}
@@ -78,7 +111,6 @@ func initApp() *cli.App {
 var app = initApp()
 
 func main() {
-	// eth.sendTransaction({from:personal.listAccounts[0], to:"0xb02A2EdA1b317FBd16760128836B0Ac59B560e9D", value: "100000000000000"})
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -97,7 +129,6 @@ func runAirdrop(c *cli.Context) error {
 }
 
 func spam(config *spammer.Config, spamFn spammer.Spam, airdropValue *big.Int) error {
-	// Make sure the accounts are unstuck before sending any transactions
 	fmt.Println("Unstucking")
 	spammer.Unstuck(config)
 	for {
@@ -138,6 +169,29 @@ func run7702Spam(c *cli.Context) error {
 	airdropValue := new(big.Int).Mul(big.NewInt(int64((1+config.N)*1000000)), big.NewInt(params.GWei))
 	airdropValue = airdropValue.Mul(airdropValue, big.NewInt(100))
 	return spam(config, spammer.Send7702Transactions, airdropValue)
+}
+
+func runBasicCampaign(c *cli.Context) error {
+	return spammer.RunBasicCampaignFromContext(c)
+}
+
+func runReplay(c *cli.Context) error {
+	resolved, err := spammer.ResolveEndpointSelection(
+		c.String(flags.RpcFlag.Name),
+		c.String(flags.RpcLabelFlag.Name),
+		c.String(flags.EndpointsFlag.Name),
+		c.String(flags.ELClientFlag.Name),
+	)
+	if err != nil {
+		return err
+	}
+	bundle, err := spammer.ReplayBundle(c.String(flags.BundleFlag.Name), resolved.RPCURL)
+	if err != nil {
+		fmt.Fprintf(c.App.Writer, "bundle=%s case=%s signature=%s rpc=%s label=%s replay_error=%v\n", c.String(flags.BundleFlag.Name), bundle.Case.CaseID, bundle.Signature.StableKey, resolved.RPCURL, resolved.RPCLabel, err)
+		return nil
+	}
+	fmt.Fprintf(c.App.Writer, "bundle=%s case=%s signature=%s rpc=%s label=%s\n", c.String(flags.BundleFlag.Name), bundle.Case.CaseID, bundle.Signature.StableKey, resolved.RPCURL, resolved.RPCLabel)
+	return nil
 }
 
 func runCreate(c *cli.Context) error {

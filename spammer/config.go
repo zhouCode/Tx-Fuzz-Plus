@@ -70,8 +70,16 @@ func NewPartialConfig(backend *rpc.Client, faucet *ecdsa.PrivateKey, keys []*ecd
 
 func NewConfigFromContext(c *cli.Context) (*Config, error) {
 	// Setup RPC
-	rpcAddr := c.String(flags.RpcFlag.Name)
-	backend, err := rpc.Dial(rpcAddr)
+	resolved, err := ResolveEndpointSelection(
+		c.String(flags.RpcFlag.Name),
+		c.String(flags.RpcLabelFlag.Name),
+		c.String(flags.EndpointsFlag.Name),
+		c.String(flags.ELClientFlag.Name),
+	)
+	if err != nil {
+		return nil, err
+	}
+	backend, err := rpc.Dial(resolved.RPCURL)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +106,9 @@ func NewConfigFromContext(c *cli.Context) (*Config, error) {
 
 	// Setup gasLimit
 	gasLimit := c.Int(flags.GasLimitFlag.Name)
+	if gasLimit <= 0 {
+		gasLimit = flags.GasLimitFlag.Value
+	}
 
 	// Setup N
 	N := c.Int(flags.TxCountFlag.Name)

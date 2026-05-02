@@ -34,8 +34,24 @@ var (
 
 	RpcFlag = &cli.StringFlag{
 		Name:  "rpc",
-		Usage: "RPC provider",
-		Value: "http://127.0.0.1:8545",
+		Usage: "RPC provider; if omitted, resolve dynamically from endpoints.json",
+	}
+
+	EndpointsFlag = &cli.StringFlag{
+		Name:  "endpoints",
+		Usage: "Path to endpoints.json inventory used to resolve execution node RPC dynamically",
+		Value: "~/ethpackage/endpoints.json",
+	}
+
+	ELClientFlag = &cli.StringFlag{
+		Name:  "el-client",
+		Usage: "Execution client label to select from endpoints.json when --rpc is omitted",
+	}
+
+	RpcLabelFlag = &cli.StringFlag{
+		Name:  "rpc-label",
+		Usage: "Label used in feedback artifacts for the RPC target",
+		Value: "default-rpc",
 	}
 
 	TxCountFlag = &cli.IntFlag{
@@ -56,15 +72,92 @@ var (
 		Value: 12,
 	}
 
+	CampaignIDFlag = &cli.StringFlag{
+		Name:  "campaign-id",
+		Usage: "Optional explicit campaign identifier",
+	}
+
+	CasesFlag = &cli.IntFlag{
+		Name:  "cases",
+		Usage: "Number of bounded cases to execute in campaign mode",
+		Value: 10,
+	}
+
+	ForkLabelFlag = &cli.StringFlag{
+		Name:  "fork-label",
+		Usage: "Fork label stored in campaign artifacts",
+		Value: "cancun",
+	}
+
+	ArtifactRootFlag = &cli.StringFlag{
+		Name:  "artifact-root",
+		Usage: "Root directory for per-case metadata and feedback artifacts",
+		Value: ".txfuzz/campaign",
+	}
+
+	RetainDirFlag = &cli.StringFlag{
+		Name:  "retain-dir",
+		Usage: "Directory for retained interesting cases",
+		Value: ".txfuzz/retain",
+	}
+
+	ReplayDirFlag = &cli.StringFlag{
+		Name:  "replay-dir",
+		Usage: "Directory for replay bundles",
+		Value: ".txfuzz/replay",
+	}
+
+	ReportJSONFlag = &cli.StringFlag{
+		Name:  "report-json",
+		Usage: "Path for the campaign JSON report",
+		Value: ".txfuzz/report.json",
+	}
+
+	RetainPerSigFlag = &cli.IntFlag{
+		Name:  "retain-per-signature",
+		Usage: "Maximum retained cases per deduplicated signature",
+		Value: 1,
+	}
+
+	BundleFlag = &cli.StringFlag{
+		Name:     "bundle",
+		Usage:    "Replay bundle JSON file",
+		Required: true,
+	}
+
 	SpamFlags = []cli.Flag{
 		SkFlag,
 		SeedFlag,
 		NoALFlag,
 		CorpusFlag,
 		RpcFlag,
+		EndpointsFlag,
+		ELClientFlag,
 		TxCountFlag,
 		CountFlag,
 		GasLimitFlag,
 		SlotTimeFlag,
+	}
+
+	CampaignFlags = []cli.Flag{
+		SkFlag,
+		SeedFlag,
+		NoALFlag,
+		CorpusFlag,
+		RpcFlag,
+		EndpointsFlag,
+		ELClientFlag,
+		RpcLabelFlag,
+		TxCountFlag,
+		CountFlag,
+		GasLimitFlag,
+		CampaignIDFlag,
+		CasesFlag,
+		ForkLabelFlag,
+		ArtifactRootFlag,
+		RetainDirFlag,
+		ReplayDirFlag,
+		ReportJSONFlag,
+		RetainPerSigFlag,
 	}
 )

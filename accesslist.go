@@ -13,17 +13,7 @@ import (
 
 // CreateAccessList creates a new access list for a transaction via the eth_createAccessList.
 func CreateAccessList(client *rpc.Client, tx *types.Transaction, from common.Address) (*types.AccessList, error) {
-	msg := ethereum.CallMsg{
-		From:       from,
-		To:         tx.To(),
-		Gas:        tx.Gas(),
-		GasPrice:   tx.GasPrice(),
-		GasFeeCap:  tx.GasFeeCap(),
-		GasTipCap:  tx.GasTipCap(),
-		Value:      tx.Value(),
-		Data:       tx.Data(),
-		AccessList: nil,
-	}
+	msg := accessListCallMsg(tx, from)
 	if client == nil {
 		return &types.AccessList{}, nil
 	}
@@ -109,4 +99,23 @@ func fullyRandom(list *types.AccessList) *types.AccessList {
 	}
 	newList := types.AccessList(accesslist)
 	return &newList
+}
+
+func accessListCallMsg(tx *types.Transaction, from common.Address) ethereum.CallMsg {
+	msg := ethereum.CallMsg{
+		From:       from,
+		To:         tx.To(),
+		Gas:        tx.Gas(),
+		Value:      tx.Value(),
+		Data:       tx.Data(),
+		AccessList: nil,
+	}
+	switch tx.Type() {
+	case types.LegacyTxType, types.AccessListTxType:
+		msg.GasPrice = tx.GasPrice()
+	default:
+		msg.GasTipCap = tx.GasTipCap()
+		msg.GasFeeCap = tx.GasFeeCap()
+	}
+	return msg
 }
