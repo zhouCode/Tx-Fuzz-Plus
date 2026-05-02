@@ -194,11 +194,7 @@ func (b *campaignBuilder) Build(ctx context.Context, sequence int) (*runner.Case
 	}, nil
 }
 
-type campaignSigner interface {
-	Sender(tx *types.Transaction) (common.Address, error)
-}
-
-func buildCampaignTx(ctx context.Context, config *Config, client *ethclient.Client, chainID *big.Int, family string, key *ecdsa.PrivateKey, sender common.Address, nonce uint64, fill *filler.Filler, sequence int) (*types.Transaction, []types.SetCodeAuthorization, campaignSigner, string, error) {
+func buildCampaignTx(ctx context.Context, config *Config, client *ethclient.Client, chainID *big.Int, family string, _ *ecdsa.PrivateKey, sender common.Address, nonce uint64, fill *filler.Filler, sequence int) (*types.Transaction, []types.SetCodeAuthorization, types.Signer, string, error) {
 	switch family {
 	case "", "basic":
 		tx, err := txfuzz.RandomValidTx(config.backend, fill, sender, nonce, nil, nil, config.accessList)
