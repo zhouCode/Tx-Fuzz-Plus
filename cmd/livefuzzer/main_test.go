@@ -47,3 +47,23 @@ func TestInitAppRegistersCampaignAndReplayCommands(t *testing.T) {
 		t.Fatalf("expected campaign and replay commands, got campaign=%v replay=%v", seenCampaign, seenReplay)
 	}
 }
+
+func TestCampaignCommandRegistersAllFamilies(t *testing.T) {
+	app := initApp()
+	for _, cmd := range app.Commands {
+		if cmd.Name != "campaign" {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, sub := range cmd.Subcommands {
+			seen[sub.Name] = true
+		}
+		for _, want := range []string{"basic", "blob", "pectra"} {
+			if !seen[want] {
+				t.Fatalf("campaign missing %s subcommand: %#v", want, seen)
+			}
+		}
+		return
+	}
+	t.Fatal("campaign command not found")
+}

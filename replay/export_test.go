@@ -44,3 +44,31 @@ func TestExportBundleWritesBundleAndRawTx(t *testing.T) {
 		t.Fatalf("unexpected bundle: %#v", bundle)
 	}
 }
+
+func TestExportBundlePreservesFamilyMetadata(t *testing.T) {
+	dir := t.TempDir()
+	retained := runner.RetainedCase{
+		Case: runner.TestcaseRecord{
+			CaseID:             "case-family",
+			CampaignID:         "campaign-family",
+			TxFamily:           "pectra",
+			ForkLabel:          "prague",
+			AuthorizationCount: 1,
+			SignedTxHex:        "0x",
+		},
+		Feedback:   feedback.Record{CaseID: "case-family", SendStatus: "sent"},
+		Signature:  interestingness.SignatureRecord{StableKey: "sig-family", SignatureKind: "receipt"},
+		RetainedAt: time.Unix(1700000005, 0).UTC(),
+	}
+	bundlePath, err := ExportBundle(dir, retained, EnvironmentSpec{ClientLabel: "local", ForkLabel: "prague"})
+	if err != nil {
+		t.Fatalf("export bundle: %v", err)
+	}
+	bundle, err := LoadBundle(bundlePath)
+	if err != nil {
+		t.Fatalf("load bundle: %v", err)
+	}
+	if bundle.Case.TxFamily != "pectra" || bundle.Case.AuthorizationCount != 1 {
+		t.Fatalf("family metadata not preserved: %#v", bundle.Case)
+	}
+}

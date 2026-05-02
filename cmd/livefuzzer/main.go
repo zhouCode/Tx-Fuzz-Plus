@@ -58,6 +58,18 @@ var campaignCommand = &cli.Command{
 			Action: runBasicCampaign,
 			Flags:  flags.CampaignFlags,
 		},
+		{
+			Name:   "blob",
+			Usage:  "Run a bounded blob transaction campaign",
+			Action: runBlobCampaign,
+			Flags:  flags.CampaignFlags,
+		},
+		{
+			Name:   "pectra",
+			Usage:  "Run a bounded 7702/auth transaction campaign",
+			Action: runPectraCampaign,
+			Flags:  flags.CampaignFlags,
+		},
 	},
 }
 
@@ -173,6 +185,14 @@ func run7702Spam(c *cli.Context) error {
 
 func runBasicCampaign(c *cli.Context) error {
 	return spammer.RunBasicCampaignFromContext(c)
+}
+
+func runBlobCampaign(c *cli.Context) error {
+	return spammer.RunBlobCampaignFromContext(c)
+}
+
+func runPectraCampaign(c *cli.Context) error {
+	return spammer.RunPectraCampaignFromContext(c)
 }
 
 func runReplay(c *cli.Context) error {
