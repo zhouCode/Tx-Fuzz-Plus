@@ -31,27 +31,30 @@ type TxSummary struct {
 }
 
 type TestcaseRecord struct {
-	CaseID             string            `json:"case_id"`
-	CampaignID         string            `json:"campaign_id"`
-	RunStartedAt       time.Time         `json:"run_started_at"`
-	Sequence           int               `json:"sequence"`
-	TxFamily           string            `json:"tx_family"`
-	ForkLabel          string            `json:"fork_label"`
-	SourceKind         string            `json:"source_kind"`
-	Seed               int64             `json:"seed"`
-	CorpusInputRef     string            `json:"corpus_input_ref,omitempty"`
-	Sender             string            `json:"sender"`
-	Nonce              uint64            `json:"nonce"`
-	GasLimit           uint64            `json:"gas_limit"`
-	AccessListEnabled  bool              `json:"access_list_enabled"`
-	ValueWei           string            `json:"value_wei"`
-	FeeFields          map[string]string `json:"fee_fields"`
-	BlobCount          int               `json:"blob_count,omitempty"`
-	AuthorizationCount int               `json:"authorization_count,omitempty"`
-	Mutation           MutationRecord    `json:"mutation"`
-	UnsignedSummary    TxSummary         `json:"unsigned_summary"`
-	SignedTxHex        string            `json:"signed_tx_hex,omitempty"`
-	SignedTxHash       string            `json:"signed_tx_hash,omitempty"`
+	CaseID               string            `json:"case_id"`
+	CampaignID           string            `json:"campaign_id"`
+	RunStartedAt         time.Time         `json:"run_started_at"`
+	Sequence             int               `json:"sequence"`
+	TxFamily             string            `json:"tx_family"`
+	ForkLabel            string            `json:"fork_label"`
+	SourceKind           string            `json:"source_kind"`
+	Seed                 int64             `json:"seed"`
+	CorpusInputRef       string            `json:"corpus_input_ref,omitempty"`
+	Sender               string            `json:"sender"`
+	Nonce                uint64            `json:"nonce"`
+	GasLimit             uint64            `json:"gas_limit"`
+	AccessListEnabled    bool              `json:"access_list_enabled"`
+	ValueWei             string            `json:"value_wei"`
+	FeeFields            map[string]string `json:"fee_fields"`
+	BlobCount            int               `json:"blob_count,omitempty"`
+	AuthorizationCount   int               `json:"authorization_count,omitempty"`
+	LaneID               string            `json:"lane_id,omitempty"`
+	SenderShard          string            `json:"sender_shard,omitempty"`
+	ConsumedNonceDomains []string          `json:"consumed_nonce_domains,omitempty"`
+	Mutation             MutationRecord    `json:"mutation"`
+	UnsignedSummary      TxSummary         `json:"unsigned_summary"`
+	SignedTxHex          string            `json:"signed_tx_hex,omitempty"`
+	SignedTxHash         string            `json:"signed_tx_hash,omitempty"`
 }
 
 type RetainedCase struct {
@@ -102,6 +105,14 @@ type Submitter interface {
 	Submit(context.Context, *Case) (feedback.Record, error)
 }
 
+type PendingSubmission interface {
+	Await(context.Context) (feedback.Record, error)
+}
+
+type AsyncSubmitter interface {
+	SubmitAsync(context.Context, *Case) (PendingSubmission, error)
+}
+
 type SinkResult struct {
 	Retained  bool
 	Duplicate bool
@@ -113,52 +124,103 @@ type Sink interface {
 
 func RunCampaign(ctx context.Context, cfg Config, builder Builder, submitter Submitter, sink Sink) (Stats, error) {
 	stats := Stats{CampaignID: cfg.CampaignID, TxFamily: cfg.TxFamily}
+	asyncSubmitter, async := submitter.(AsyncSubmitter)
+	if !async {
+		for i := 1; i <= cfg.Cases; i++ {
+			stats.TotalCases++
+			c, err := builder.Build(ctx, i)
+			if err != nil {
+				return stats, err
+			}
+			normalizeCaseFromConfig(c, cfg, i)
+			rec, err := submitter.Submit(ctx, c)
+			if err != nil {
+				return stats, err
+			}
+			if err := acceptOutcome(ctx, c.Record, rec, sink, &stats); err != nil {
+				return stats, err
+			}
+		}
+		return stats, nil
+	}
+
+	var (
+		current *Case
+		err     error
+	)
+	if cfg.Cases <= 0 {
+		return stats, nil
+	}
+	current, err = builder.Build(ctx, 1)
+	if err != nil {
+		return stats, err
+	}
+	normalizeCaseFromConfig(current, cfg, 1)
 	for i := 1; i <= cfg.Cases; i++ {
 		stats.TotalCases++
-		c, err := builder.Build(ctx, i)
+		pending, err := asyncSubmitter.SubmitAsync(ctx, current)
 		if err != nil {
 			return stats, err
 		}
-		if c.Record.CampaignID == "" {
-			c.Record.CampaignID = cfg.CampaignID
+		var next *Case
+		if i < cfg.Cases {
+			next, err = builder.Build(ctx, i+1)
+			if err != nil {
+				return stats, err
+			}
+			normalizeCaseFromConfig(next, cfg, i+1)
 		}
-		if c.Record.CaseID == "" {
-			c.Record.CaseID = NewCaseID(i)
-		}
-		if c.Record.TxFamily == "" {
-			c.Record.TxFamily = cfg.TxFamily
-		}
-		if c.Record.ForkLabel == "" {
-			c.Record.ForkLabel = cfg.ForkLabel
-		}
-		if c.Record.RunStartedAt.IsZero() {
-			c.Record.RunStartedAt = time.Now().UTC()
-		}
-		rec, err := submitter.Submit(ctx, c)
+		rec, err := pending.Await(ctx)
 		if err != nil {
 			return stats, err
 		}
-		if rec.CaseID == "" {
-			rec.CaseID = c.Record.CaseID
-		}
-		if rec.SendStatus == "sent" {
-			stats.SentCases++
-		}
-		outcome := Outcome{Case: c.Record, Feedback: rec}
-		outcome.Signature = interestingness.SignatureForFeedback(c.Record.TxFamily, c.Record.ForkLabel, rec)
-		outcome.Score, outcome.Reasons = interestingness.ScoreFeedback(outcome.Signature, rec)
-		result, err := sink.Accept(ctx, outcome)
-		if err != nil {
+		if err := acceptOutcome(ctx, current.Record, rec, sink, &stats); err != nil {
 			return stats, err
 		}
-		if result.Retained {
-			stats.RetainedCases++
-		}
-		if result.Duplicate {
-			stats.DuplicateCases++
-		}
+		current = next
 	}
 	return stats, nil
+}
+
+func normalizeCaseFromConfig(c *Case, cfg Config, sequence int) {
+	if c.Record.CampaignID == "" {
+		c.Record.CampaignID = cfg.CampaignID
+	}
+	if c.Record.CaseID == "" {
+		c.Record.CaseID = NewCaseID(sequence)
+	}
+	if c.Record.TxFamily == "" {
+		c.Record.TxFamily = cfg.TxFamily
+	}
+	if c.Record.ForkLabel == "" {
+		c.Record.ForkLabel = cfg.ForkLabel
+	}
+	if c.Record.RunStartedAt.IsZero() {
+		c.Record.RunStartedAt = time.Now().UTC()
+	}
+}
+
+func acceptOutcome(ctx context.Context, record TestcaseRecord, rec feedback.Record, sink Sink, stats *Stats) error {
+	if rec.CaseID == "" {
+		rec.CaseID = record.CaseID
+	}
+	if rec.SendStatus == "sent" {
+		stats.SentCases++
+	}
+	outcome := Outcome{Case: record, Feedback: rec}
+	outcome.Signature = interestingness.SignatureForFeedback(record.TxFamily, record.ForkLabel, rec)
+	outcome.Score, outcome.Reasons = interestingness.ScoreFeedback(outcome.Signature, rec)
+	result, err := sink.Accept(ctx, outcome)
+	if err != nil {
+		return err
+	}
+	if result.Retained {
+		stats.RetainedCases++
+	}
+	if result.Duplicate {
+		stats.DuplicateCases++
+	}
+	return nil
 }
 
 type Report struct {
@@ -172,23 +234,64 @@ type Report struct {
 }
 
 func WriteCaseArtifact(root string, record TestcaseRecord, fb feedback.Record) (string, string, error) {
-	caseDir := filepath.Join(root, "cases")
-	feedbackDir := filepath.Join(root, "feedback")
-	if err := os.MkdirAll(caseDir, 0o755); err != nil {
+	casePath, err := WriteCaseMetadataArtifactPath(root, record)
+	if err != nil {
 		return "", "", err
 	}
-	if err := os.MkdirAll(feedbackDir, 0o755); err != nil {
-		return "", "", err
-	}
-	casePath := filepath.Join(caseDir, record.CaseID+".json")
-	feedbackPath := filepath.Join(feedbackDir, record.CaseID+".json")
-	if err := writeJSON(casePath, record); err != nil {
-		return "", "", err
-	}
-	if err := writeJSON(feedbackPath, fb); err != nil {
+	feedbackPath, err := WriteFeedbackArtifactPath(root, fb)
+	if err != nil {
 		return "", "", err
 	}
 	return casePath, feedbackPath, nil
+}
+
+func WriteCaseMetadataArtifact(root string, record TestcaseRecord) error {
+	_, err := WriteCaseMetadataArtifactPath(root, record)
+	return err
+}
+
+func WriteFeedbackArtifact(root string, fb feedback.Record) error {
+	_, err := WriteFeedbackArtifactPath(root, fb)
+	return err
+}
+
+func WriteCaseMetadataArtifactPath(root string, record TestcaseRecord) (string, error) {
+	caseDir := filepath.Join(root, "cases")
+	if err := os.MkdirAll(caseDir, 0o755); err != nil {
+		return "", err
+	}
+	casePath := filepath.Join(caseDir, record.CaseID+".json")
+	if err := writeJSON(casePath, record); err != nil {
+		return "", err
+	}
+	return casePath, nil
+}
+
+func WriteFeedbackArtifactPath(root string, fb feedback.Record) (string, error) {
+	feedbackDir := filepath.Join(root, "feedback")
+	if err := os.MkdirAll(feedbackDir, 0o755); err != nil {
+		return "", err
+	}
+	feedbackPath := filepath.Join(feedbackDir, fb.CaseID+".json")
+	if err := writeJSON(feedbackPath, fb); err != nil {
+		return "", err
+	}
+	return feedbackPath, nil
+}
+
+func IsCanonicalFeedbackTerminal(fb feedback.Record) bool {
+	if fb.ReceiptObserved {
+		return true
+	}
+	if fb.SendStatus != "sent" {
+		return true
+	}
+	for _, flag := range fb.AnomalyFlags {
+		if flag == string(ConfirmStateUnresolvedShutdown) {
+			return true
+		}
+	}
+	return false
 }
 
 func WriteReport(path string, stats Stats) error {

@@ -24,3 +24,17 @@ func TestSelectExecutionNodeByELClient(t *testing.T) {
 		t.Fatalf("unexpected node: %+v", node)
 	}
 }
+
+func TestSelectExecutionNodeDefaultsToSingleFirstNodeWhenClientOmitted(t *testing.T) {
+	nodes := []ExecutionNode{
+		{ELClient: "geth", RPC: "127.0.0.1:1"},
+		{ELClient: "reth", RPC: "127.0.0.1:2"},
+	}
+	node, err := selectExecutionNode(nodes, "")
+	if err != nil {
+		t.Fatalf("select node: %v", err)
+	}
+	if node != nodes[0] {
+		t.Fatalf("expected first node to be selected when el-client is omitted, got %+v want %+v", node, nodes[0])
+	}
+}

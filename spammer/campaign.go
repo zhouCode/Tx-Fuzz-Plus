@@ -1,15 +1,18 @@
 package spammer
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	mrand "math/rand"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MariusVanDerWijden/FuzzyVM/filler"
@@ -61,29 +64,44 @@ func RunCampaignFamilyFromContext(c *cli.Context, family string) error {
 	if err != nil {
 		return err
 	}
-	return RunCampaign(config, CampaignOptions{
-		CampaignID:     c.String(flags.CampaignIDFlag.Name),
-		Cases:          c.Int(flags.CasesFlag.Name),
+	return RunCampaign(config, campaignOptionsFromContext(c, family))
+}
+
+func campaignOptionsFromContext(c *cli.Context, family string) CampaignOptions {
+	return CampaignOptions{
+		CampaignID:     stringFlagValue(c, flags.CampaignIDFlag),
+		Cases:          intFlagValue(c, flags.CasesFlag),
 		TxFamily:       family,
-		ForkLabel:      c.String(flags.ForkLabelFlag.Name),
-		ArtifactRoot:   c.String(flags.ArtifactRootFlag.Name),
-		RetainDir:      c.String(flags.RetainDirFlag.Name),
-		ReplayDir:      c.String(flags.ReplayDirFlag.Name),
-		ReportJSON:     c.String(flags.ReportJSONFlag.Name),
-		RPCLabel:       c.String(flags.RpcLabelFlag.Name),
-		RetainPerSig:   c.Int(flags.RetainPerSigFlag.Name),
+		ForkLabel:      stringFlagValue(c, flags.ForkLabelFlag),
+		ArtifactRoot:   stringFlagValue(c, flags.ArtifactRootFlag),
+		RetainDir:      stringFlagValue(c, flags.RetainDirFlag),
+		ReplayDir:      stringFlagValue(c, flags.ReplayDirFlag),
+		ReportJSON:     stringFlagValue(c, flags.ReportJSONFlag),
+		RPCLabel:       stringFlagValue(c, flags.RpcLabelFlag),
+		RetainPerSig:   intFlagValue(c, flags.RetainPerSigFlag),
 		ReceiptTimeout: 2 * time.Second,
-	})
-}
-
-func RunBasicCampaign(config *Config, opts CampaignOptions) error {
-	if opts.TxFamily == "" {
-		opts.TxFamily = "basic"
 	}
-	return RunCampaign(config, opts)
 }
 
-func RunCampaign(config *Config, opts CampaignOptions) error {
+func stringFlagValue(c *cli.Context, flag *cli.StringFlag) string {
+	for _, name := range flag.Names() {
+		if c.IsSet(name) {
+			return c.String(name)
+		}
+	}
+	return c.String(flag.Name)
+}
+
+func intFlagValue(c *cli.Context, flag *cli.IntFlag) int {
+	for _, name := range flag.Names() {
+		if c.IsSet(name) {
+			return c.Int(name)
+		}
+	}
+	return c.Int(flag.Name)
+}
+
+func normalizeCampaignOptions(opts CampaignOptions) CampaignOptions {
 	if opts.CampaignID == "" {
 		opts.CampaignID = runner.NewCampaignID()
 	}
@@ -109,13 +127,31 @@ func RunCampaign(config *Config, opts CampaignOptions) error {
 	if opts.RetainPerSig <= 0 {
 		opts.RetainPerSig = 1
 	}
+	return opts
+}
+
+func RunBasicCampaign(config *Config, opts CampaignOptions) error {
+	if opts.TxFamily == "" {
+		opts.TxFamily = "basic"
+	}
+	return RunCampaign(config, opts)
+}
+
+func RunCampaign(config *Config, opts CampaignOptions) error {
+	opts = normalizeCampaignOptions(opts)
 
 	client := ethclient.NewClient(config.backend)
 	chainID, err := client.ChainID(context.Background())
 	if err != nil {
 		return err
 	}
-	builder := &campaignBuilder{config: config, client: client, chainID: chainID, options: opts}
+	builder := &campaignBuilder{
+		config:  config,
+		client:  client,
+		chainID: chainID,
+		options: opts,
+		nonce:   runner.NewOrchestrator(client),
+	}
 	submitter := &campaignSubmitter{client: client, rpcLabel: opts.RPCLabel, receiptTimeout: opts.ReceiptTimeout}
 	sink := &campaignSink{
 		artifactRoot: opts.ArtifactRoot,
@@ -139,6 +175,7 @@ type campaignBuilder struct {
 	client  *ethclient.Client
 	chainID *big.Int
 	options CampaignOptions
+	nonce   *runner.Orchestrator
 }
 
 func (b *campaignBuilder) Build(ctx context.Context, sequence int) (*runner.Case, error) {
@@ -147,12 +184,13 @@ func (b *campaignBuilder) Build(ctx context.Context, sequence int) (*runner.Case
 		key = b.config.keys[(sequence-1)%len(b.config.keys)]
 	}
 	sender := crypto.PubkeyToAddress(key.PublicKey)
-	nonce, err := b.client.PendingNonceAt(ctx, sender)
+	lane := b.nonce.NewLane()
+	nonce, err := lane.Lease(ctx, sender)
 	if err != nil {
 		return nil, err
 	}
 	fill, mutation, corpusRef, sourceKind := buildCampaignFiller(b.config)
-	tx, auths, signer, family, err := buildCampaignTx(ctx, b.config, b.client, b.chainID, b.options.TxFamily, key, sender, nonce, fill, sequence)
+	tx, auths, signer, family, err := buildCampaignTx(ctx, b.config, b.client, b.chainID, b.options.TxFamily, key, sender, nonce, fill, sequence, lane)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +232,7 @@ func (b *campaignBuilder) Build(ctx context.Context, sequence int) (*runner.Case
 	}, nil
 }
 
-func buildCampaignTx(ctx context.Context, config *Config, client *ethclient.Client, chainID *big.Int, family string, _ *ecdsa.PrivateKey, sender common.Address, nonce uint64, fill *filler.Filler, sequence int) (*types.Transaction, []types.SetCodeAuthorization, types.Signer, string, error) {
+func buildCampaignTx(ctx context.Context, config *Config, client *ethclient.Client, chainID *big.Int, family string, _ *ecdsa.PrivateKey, sender common.Address, nonce uint64, fill *filler.Filler, sequence int, lane *runner.Lane) (*types.Transaction, []types.SetCodeAuthorization, types.Signer, string, error) {
 	switch family {
 	case "", "basic":
 		tx, err := txfuzz.RandomValidTx(config.backend, fill, sender, nonce, nil, nil, config.accessList)
@@ -203,7 +241,7 @@ func buildCampaignTx(ctx context.Context, config *Config, client *ethclient.Clie
 		tx, err := txfuzz.RandomBlobTx(config.backend, fill, sender, nonce, nil, nil, config.accessList)
 		return tx, nil, types.NewCancunSigner(chainID), "blob", err
 	case "pectra":
-		auths, err := buildSetCodeAuthorizations(ctx, config, client, chainID, sender, sequence)
+		auths, err := buildSetCodeAuthorizations(ctx, config, chainID, sender, sequence, lane)
 		if err != nil {
 			return nil, nil, nil, "pectra", err
 		}
@@ -214,13 +252,13 @@ func buildCampaignTx(ctx context.Context, config *Config, client *ethclient.Clie
 	}
 }
 
-func buildSetCodeAuthorizations(ctx context.Context, config *Config, client *ethclient.Client, chainID *big.Int, sender common.Address, sequence int) ([]types.SetCodeAuthorization, error) {
+func buildSetCodeAuthorizations(ctx context.Context, config *Config, chainID *big.Int, sender common.Address, sequence int, lane *runner.Lane) ([]types.SetCodeAuthorization, error) {
 	if len(config.keys) == 0 {
 		return nil, fmt.Errorf("missing authorizer keys")
 	}
 	authorizer := config.keys[(sequence-1)%len(config.keys)]
 	authorizerAddr := crypto.PubkeyToAddress(authorizer.PublicKey)
-	nonceAuth, err := client.PendingNonceAt(ctx, authorizerAddr)
+	nonceAuth, err := lane.Lease(ctx, authorizerAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -254,9 +292,52 @@ type campaignSubmitter struct {
 	client         *ethclient.Client
 	rpcLabel       string
 	receiptTimeout time.Duration
+	artifactRoot   string
+	sendTx         func(context.Context, *types.Transaction) error
+	waitMined      func(context.Context, *ethclient.Client, *types.Transaction) (*types.Receipt, error)
+	lane           chan struct{}
+}
+
+type campaignEvent struct {
+	CaseID          string   `json:"case_id"`
+	CampaignID      string   `json:"campaign_id,omitempty"`
+	Stage           string   `json:"stage"`
+	SendStatus      string   `json:"send_status"`
+	ReceiptObserved bool     `json:"receipt_observed"`
+	AnomalyFlags    []string `json:"anomaly_flags,omitempty"`
 }
 
 func (s *campaignSubmitter) Submit(ctx context.Context, c *runner.Case) (feedback.Record, error) {
+	pending, err := s.SubmitAsync(ctx, c)
+	if err != nil {
+		return feedback.Record{}, err
+	}
+	return pending.Await(ctx)
+}
+
+type pendingCampaignSubmission struct {
+	recordCh <-chan feedback.Record
+	errCh    <-chan error
+	once     sync.Once
+	record   feedback.Record
+	err      error
+}
+
+func (p *pendingCampaignSubmission) Await(ctx context.Context) (feedback.Record, error) {
+	p.once.Do(func() {
+		select {
+		case <-ctx.Done():
+			p.err = ctx.Err()
+		case err := <-p.errCh:
+			p.err = err
+		case record := <-p.recordCh:
+			p.record = record
+		}
+	})
+	return p.record, p.err
+}
+
+func (s *campaignSubmitter) SubmitAsync(ctx context.Context, c *runner.Case) (runner.PendingSubmission, error) {
 	start := time.Now().UTC()
 	record := feedback.Record{
 		CaseID:          c.Record.CaseID,
@@ -267,44 +348,139 @@ func (s *campaignSubmitter) Submit(ctx context.Context, c *runner.Case) (feedbac
 		record.SendStatus = "internal_error"
 		record.RPCErrorClass = "missing_tx"
 		record.RPCErrorMessage = "runner case missing signed transaction"
-		return record, nil
+		return completedPendingSubmission(record), nil
 	}
-	if err := s.client.SendTransaction(ctx, c.Tx); err != nil {
+	lane := s.ensureLane()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case lane <- struct{}{}:
+	}
+	sendTx := s.sendTransaction
+	if err := sendTx(ctx, c.Tx); err != nil {
+		s.releaseLane()
 		record.SubmitLatencyMS = time.Since(start).Milliseconds()
 		record.SendStatus = "rpc_error"
 		record.RPCErrorClass = classifyRPCError(err)
 		record.RPCErrorMessage = err.Error()
-		return record, nil
+		return completedPendingSubmission(record), nil
 	}
 	record.SubmitLatencyMS = time.Since(start).Milliseconds()
 	record.SendStatus = "sent"
-	receiptCtx, cancel := context.WithTimeout(ctx, s.receiptTimeout)
-	defer cancel()
-	receipt, err := bind.WaitMined(receiptCtx, s.client, c.Tx)
+	if err := s.appendEvent(c.Record, record, "submitted"); err != nil {
+		s.releaseLane()
+		return nil, err
+	}
+	recordCh := make(chan feedback.Record, 1)
+	errCh := make(chan error, 1)
+	go func(base feedback.Record) {
+		defer s.releaseLane()
+		receiptCtx, cancel := context.WithTimeout(context.Background(), s.receiptTimeout)
+		defer cancel()
+		receipt, err := s.waitForMined(receiptCtx, c.Tx)
+		if err != nil {
+			if receiptCtx.Err() != nil {
+				base.AnomalyFlags = append(base.AnomalyFlags, "receipt_timeout")
+				_ = s.appendEvent(c.Record, base, "finalized")
+				recordCh <- base
+				return
+			}
+			base.AnomalyFlags = append(base.AnomalyFlags, "receipt_lookup_failed")
+			base.ProcessSignals.StderrHints = append(base.ProcessSignals.StderrHints, err.Error())
+			_ = s.appendEvent(c.Record, base, "finalized")
+			recordCh <- base
+			return
+		}
+		if receipt != nil {
+			status := receipt.Status
+			gasUsed := receipt.GasUsed
+			latency := time.Since(start).Milliseconds()
+			base.ReceiptObserved = true
+			base.ReceiptStatus = &status
+			base.ReceiptGasUsed = &gasUsed
+			base.InclusionLatencyMS = &latency
+			if status == types.ReceiptStatusSuccessful {
+				base.ExecutionBucket = "success"
+			} else {
+				base.ExecutionBucket = "reverted"
+			}
+		}
+		_ = s.appendEvent(c.Record, base, "finalized")
+		recordCh <- base
+	}(record)
+	return &pendingCampaignSubmission{recordCh: recordCh, errCh: errCh}, nil
+}
+
+func completedPendingSubmission(record feedback.Record) runner.PendingSubmission {
+	recordCh := make(chan feedback.Record, 1)
+	errCh := make(chan error, 1)
+	recordCh <- record
+	return &pendingCampaignSubmission{recordCh: recordCh, errCh: errCh}
+}
+
+func (s *campaignSubmitter) ensureLane() chan struct{} {
+	if s.lane == nil {
+		s.lane = make(chan struct{}, 1)
+	}
+	return s.lane
+}
+
+func (s *campaignSubmitter) releaseLane() {
+	if s.lane == nil {
+		return
+	}
+	select {
+	case <-s.lane:
+	default:
+	}
+}
+
+func (s *campaignSubmitter) sendTransaction(ctx context.Context, tx *types.Transaction) error {
+	if s.sendTx != nil {
+		return s.sendTx(ctx, tx)
+	}
+	return s.client.SendTransaction(ctx, tx)
+}
+
+func (s *campaignSubmitter) waitForMined(ctx context.Context, tx *types.Transaction) (*types.Receipt, error) {
+	if s.waitMined != nil {
+		return s.waitMined(ctx, s.client, tx)
+	}
+	return bind.WaitMined(ctx, s.client, tx)
+}
+
+func (s *campaignSubmitter) appendEvent(record runner.TestcaseRecord, fb feedback.Record, stage string) error {
+	if strings.TrimSpace(s.artifactRoot) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(s.artifactRoot, 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(filepath.Join(s.artifactRoot, "events.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		if receiptCtx.Err() != nil {
-			record.AnomalyFlags = append(record.AnomalyFlags, "receipt_timeout")
-			return record, nil
-		}
-		record.AnomalyFlags = append(record.AnomalyFlags, "receipt_lookup_failed")
-		record.ProcessSignals.StderrHints = append(record.ProcessSignals.StderrHints, err.Error())
-		return record, nil
+		return err
 	}
-	if receipt != nil {
-		status := receipt.Status
-		gasUsed := receipt.GasUsed
-		latency := time.Since(start).Milliseconds()
-		record.ReceiptObserved = true
-		record.ReceiptStatus = &status
-		record.ReceiptGasUsed = &gasUsed
-		record.InclusionLatencyMS = &latency
-		if status == types.ReceiptStatusSuccessful {
-			record.ExecutionBucket = "success"
-		} else {
-			record.ExecutionBucket = "reverted"
-		}
+	defer file.Close()
+	writer := bufio.NewWriter(file)
+	event := campaignEvent{
+		CaseID:          record.CaseID,
+		CampaignID:      record.CampaignID,
+		Stage:           stage,
+		SendStatus:      fb.SendStatus,
+		ReceiptObserved: fb.ReceiptObserved,
+		AnomalyFlags:    fb.AnomalyFlags,
 	}
-	return record, nil
+	blob, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(blob); err != nil {
+		return err
+	}
+	if err := writer.WriteByte('\n'); err != nil {
+		return err
+	}
+	return writer.Flush()
 }
 
 type campaignSink struct {
@@ -314,8 +490,13 @@ type campaignSink struct {
 }
 
 func (s *campaignSink) Accept(_ context.Context, outcome runner.Outcome) (runner.SinkResult, error) {
-	if _, _, err := runner.WriteCaseArtifact(s.artifactRoot, outcome.Case, outcome.Feedback); err != nil {
+	if err := runner.WriteCaseMetadataArtifact(s.artifactRoot, outcome.Case); err != nil {
 		return runner.SinkResult{}, err
+	}
+	if runner.IsCanonicalFeedbackTerminal(outcome.Feedback) {
+		if err := runner.WriteFeedbackArtifact(s.artifactRoot, outcome.Feedback); err != nil {
+			return runner.SinkResult{}, err
+		}
 	}
 	retained := runner.RetainedCase{
 		Case:       outcome.Case,

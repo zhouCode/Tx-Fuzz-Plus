@@ -90,15 +90,17 @@ var (
 	}
 
 	ForkLabelFlag = &cli.StringFlag{
-		Name:  "fork-label",
-		Usage: "Fork label stored in campaign artifacts",
-		Value: "cancun",
+		Name:    "fork-label",
+		Aliases: []string{"fork"},
+		Usage:   "Fork label stored in campaign artifacts",
+		Value:   "cancun",
 	}
 
 	ArtifactRootFlag = &cli.StringFlag{
-		Name:  "artifact-root",
-		Usage: "Root directory for per-case metadata and feedback artifacts",
-		Value: ".txfuzz/campaign",
+		Name:    "artifact-root",
+		Aliases: []string{"artifacts"},
+		Usage:   "Root directory for per-case metadata and feedback artifacts",
+		Value:   ".txfuzz/campaign",
 	}
 
 	RetainDirFlag = &cli.StringFlag{
@@ -120,9 +122,10 @@ var (
 	}
 
 	RetainPerSigFlag = &cli.IntFlag{
-		Name:  "retain-per-signature",
-		Usage: "Maximum retained cases per deduplicated signature",
-		Value: 1,
+		Name:    "retain-per-signature",
+		Aliases: []string{"retain-per-sig"},
+		Usage:   "Maximum retained cases per deduplicated signature",
+		Value:   1,
 	}
 
 	BundleFlag = &cli.StringFlag{

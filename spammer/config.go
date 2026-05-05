@@ -20,7 +20,8 @@ import (
 )
 
 type Config struct {
-	backend *rpc.Client // connection to the rpc provider
+	backend          *rpc.Client // connection to the rpc provider
+	resolvedEndpoint ResolvedEndpoint
 
 	N          uint64              // number of transactions send per account
 	faucet     *ecdsa.PrivateKey   // private key of the faucet account
@@ -48,15 +49,16 @@ func NewDefaultConfig(rpcAddr string, N uint64, accessList bool, rng *rand.Rand)
 	}
 
 	return &Config{
-		backend:    backend,
-		N:          N,
-		faucet:     crypto.ToECDSAUnsafe(common.FromHex(txfuzz.SK)),
-		keys:       keys,
-		corpus:     [][]byte{},
-		accessList: accessList,
-		gasLimit:   30_000_000,
-		seed:       0,
-		mut:        mutator.NewMutator(rng),
+		backend:          backend,
+		resolvedEndpoint: ResolvedEndpoint{RPCURL: rpcAddr, RPCLabel: "explicit-rpc"},
+		N:                N,
+		faucet:           crypto.ToECDSAUnsafe(common.FromHex(txfuzz.SK)),
+		keys:             keys,
+		corpus:           [][]byte{},
+		accessList:       accessList,
+		gasLimit:         30_000_000,
+		seed:             0,
+		mut:              mutator.NewMutator(rng),
 	}, nil
 }
 
@@ -147,16 +149,17 @@ func NewConfigFromContext(c *cli.Context) (*Config, error) {
 	}
 
 	return &Config{
-		backend:    backend,
-		N:          uint64(N),
-		faucet:     faucet,
-		accessList: !c.Bool(flags.NoALFlag.Name),
-		gasLimit:   uint64(gasLimit),
-		seed:       seed,
-		keys:       keys,
-		corpus:     corpus,
-		mut:        mut,
-		SlotTime:   slotTime,
+		backend:          backend,
+		resolvedEndpoint: resolved,
+		N:                uint64(N),
+		faucet:           faucet,
+		accessList:       !c.Bool(flags.NoALFlag.Name),
+		gasLimit:         uint64(gasLimit),
+		seed:             seed,
+		keys:             keys,
+		corpus:           corpus,
+		mut:              mut,
+		SlotTime:         slotTime,
 	}, nil
 }
 

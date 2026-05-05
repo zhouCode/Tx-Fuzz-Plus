@@ -327,6 +327,9 @@ func New4844Tx(nonce uint64, to *common.Address, gasLimit uint64, chainID, tip, 
 
 func getCaps(rpc *rpc.Client, defaultGasPrice *big.Int) (*big.Int, *big.Int, error) {
 	if rpc == nil {
+		if defaultGasPrice == nil {
+			defaultGasPrice = new(big.Int).Mul(big.NewInt(2), big.NewInt(params.GWei))
+		}
 		tip := new(big.Int).Mul(big.NewInt(1), big.NewInt(params.GWei))
 		if defaultGasPrice.Cmp(tip) >= 0 {
 			feeCap := new(big.Int).Sub(defaultGasPrice, tip)
