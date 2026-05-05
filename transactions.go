@@ -10,6 +10,7 @@ import (
 	"github.com/MariusVanDerWijden/FuzzyVM/generator"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -162,22 +163,26 @@ var alStrategies = append(noAlStrategies, []txCreationStrategy{
 
 func legacyContractCreation(conf *txConf) (*types.Transaction, error) {
 	// Legacy contract creation
-	return types.NewContractCreation(conf.nonce, conf.value, conf.gasLimit, conf.gasPrice, conf.code), nil
+	tx := types.NewContractCreation(conf.nonce, conf.value, conf.gasLimit, conf.gasPrice, conf.code)
+	return applyIntrinsicGasFloor(tx)
 }
 
 func legacyTx(conf *txConf) (*types.Transaction, error) {
 	// Legacy transaction
-	return types.NewTransaction(conf.nonce, *conf.to, conf.value, conf.gasLimit, conf.gasPrice, conf.code), nil
+	tx := types.NewTransaction(conf.nonce, *conf.to, conf.value, conf.gasLimit, conf.gasPrice, conf.code)
+	return applyIntrinsicGasFloor(tx)
 }
 
 func emptyAlContractCreation(conf *txConf) (*types.Transaction, error) {
 	// AccessList contract creation
-	return newALTx(conf.nonce, nil, conf.gasLimit, conf.chainID, conf.gasPrice, conf.value, conf.code, make(types.AccessList, 0)), nil
+	tx := newALTx(conf.nonce, nil, conf.gasLimit, conf.chainID, conf.gasPrice, conf.value, conf.code, make(types.AccessList, 0))
+	return applyIntrinsicGasFloor(tx)
 }
 
 func emptyAlTx(conf *txConf) (*types.Transaction, error) {
 	// AccessList transaction
-	return newALTx(conf.nonce, conf.to, conf.gasLimit, conf.chainID, conf.gasPrice, conf.value, conf.code, make(types.AccessList, 0)), nil
+	tx := newALTx(conf.nonce, conf.to, conf.gasLimit, conf.chainID, conf.gasPrice, conf.value, conf.code, make(types.AccessList, 0))
+	return applyIntrinsicGasFloor(tx)
 }
 
 func contractCreation1559(conf *txConf) (*types.Transaction, error) {
@@ -186,7 +191,8 @@ func contractCreation1559(conf *txConf) (*types.Transaction, error) {
 	if err != nil {
 		return nil, err
 	}
-	return new1559Tx(conf.nonce, nil, conf.gasLimit, conf.chainID, tip, feecap, conf.value, conf.code, make(types.AccessList, 0)), nil
+	tx := new1559Tx(conf.nonce, nil, conf.gasLimit, conf.chainID, tip, feecap, conf.value, conf.code, make(types.AccessList, 0))
+	return applyIntrinsicGasFloor(tx)
 }
 
 func tx1559(conf *txConf) (*types.Transaction, error) {
@@ -195,32 +201,42 @@ func tx1559(conf *txConf) (*types.Transaction, error) {
 	if err != nil {
 		return nil, err
 	}
-	return new1559Tx(conf.nonce, conf.to, conf.gasLimit, conf.chainID, tip, feecap, conf.value, conf.code, make(types.AccessList, 0)), nil
+	tx := new1559Tx(conf.nonce, conf.to, conf.gasLimit, conf.chainID, tip, feecap, conf.value, conf.code, make(types.AccessList, 0))
+	return applyIntrinsicGasFloor(tx)
 }
 
 func fullAlContractCreation(conf *txConf) (*types.Transaction, error) {
 	// AccessList contract creation with AL
-	tx := types.NewContractCreation(conf.nonce, conf.value, conf.gasLimit, conf.gasPrice, conf.code)
+	tx, err := applyIntrinsicGasFloor(types.NewContractCreation(conf.nonce, conf.value, conf.gasLimit, conf.gasPrice, conf.code))
+	if err != nil {
+		return nil, err
+	}
 	al, err := CreateAccessList(conf.rpc, tx, conf.sender)
 	if err != nil {
 		return nil, err
 	}
-	return newALTx(conf.nonce, nil, conf.gasLimit, conf.chainID, conf.gasPrice, conf.value, conf.code, *al), nil
+	return applyIntrinsicGasFloor(newALTx(conf.nonce, nil, tx.Gas(), conf.chainID, conf.gasPrice, conf.value, conf.code, *al))
 }
 
 func fullAlTx(conf *txConf) (*types.Transaction, error) {
 	// AccessList transaction with AL
-	tx := types.NewTransaction(conf.nonce, *conf.to, conf.value, conf.gasLimit, conf.gasPrice, conf.code)
+	tx, err := applyIntrinsicGasFloor(types.NewTransaction(conf.nonce, *conf.to, conf.value, conf.gasLimit, conf.gasPrice, conf.code))
+	if err != nil {
+		return nil, err
+	}
 	al, err := CreateAccessList(conf.rpc, tx, conf.sender)
 	if err != nil {
 		return nil, err
 	}
-	return newALTx(conf.nonce, conf.to, conf.gasLimit, conf.chainID, conf.gasPrice, conf.value, conf.code, *al), nil
+	return applyIntrinsicGasFloor(newALTx(conf.nonce, conf.to, tx.Gas(), conf.chainID, conf.gasPrice, conf.value, conf.code, *al))
 }
 
 func fullAl1559ContractCreation(conf *txConf) (*types.Transaction, error) {
 	// 1559 contract creation with AL
-	tx := types.NewContractCreation(conf.nonce, conf.value, conf.gasLimit, conf.gasPrice, conf.code)
+	tx, err := applyIntrinsicGasFloor(types.NewContractCreation(conf.nonce, conf.value, conf.gasLimit, conf.gasPrice, conf.code))
+	if err != nil {
+		return nil, err
+	}
 	al, err := CreateAccessList(conf.rpc, tx, conf.sender)
 	if err != nil {
 		return nil, err
@@ -229,12 +245,15 @@ func fullAl1559ContractCreation(conf *txConf) (*types.Transaction, error) {
 	if err != nil {
 		return nil, err
 	}
-	return new1559Tx(conf.nonce, nil, conf.gasLimit, conf.chainID, tip, feecap, conf.value, conf.code, *al), nil
+	return applyIntrinsicGasFloor(new1559Tx(conf.nonce, nil, tx.Gas(), conf.chainID, tip, feecap, conf.value, conf.code, *al))
 }
 
 func fullAl1559Tx(conf *txConf) (*types.Transaction, error) {
 	// 1559 tx with AL
-	tx := types.NewTransaction(conf.nonce, *conf.to, conf.value, conf.gasLimit, conf.gasPrice, conf.code)
+	tx, err := applyIntrinsicGasFloor(types.NewTransaction(conf.nonce, *conf.to, conf.value, conf.gasLimit, conf.gasPrice, conf.code))
+	if err != nil {
+		return nil, err
+	}
 	al, err := CreateAccessList(conf.rpc, tx, conf.sender)
 	if err != nil {
 		return nil, err
@@ -243,7 +262,7 @@ func fullAl1559Tx(conf *txConf) (*types.Transaction, error) {
 	if err != nil {
 		return nil, err
 	}
-	return new1559Tx(conf.nonce, conf.to, conf.gasLimit, conf.chainID, tip, feecap, conf.value, conf.code, *al), nil
+	return applyIntrinsicGasFloor(new1559Tx(conf.nonce, conf.to, tx.Gas(), conf.chainID, tip, feecap, conf.value, conf.code, *al))
 }
 
 func emptyAlBlobTx(conf *txConf) (*types.Transaction, error) {
@@ -275,6 +294,55 @@ func fullAlBlobTx(conf *txConf) (*types.Transaction, error) {
 		return nil, err
 	}
 	return New4844Tx(conf.nonce, conf.to, conf.gasLimit, conf.chainID, tip, feecap, conf.value, conf.code, big.NewInt(1000000), data, *al), nil
+}
+
+func applyIntrinsicGasFloor(tx *types.Transaction) (*types.Transaction, error) {
+	if tx == nil {
+		return nil, nil
+	}
+	intrinsic, err := core.IntrinsicGas(tx.Data(), tx.AccessList(), tx.SetCodeAuthorizations(), tx.To() == nil, true, true, true)
+	if err != nil {
+		return nil, err
+	}
+	if tx.Gas() >= intrinsic {
+		return tx, nil
+	}
+	switch tx.Type() {
+	case types.LegacyTxType:
+		return types.NewTx(&types.LegacyTx{
+			Nonce:    tx.Nonce(),
+			To:       tx.To(),
+			Value:    tx.Value(),
+			Gas:      intrinsic,
+			GasPrice: tx.GasPrice(),
+			Data:     append([]byte(nil), tx.Data()...),
+		}), nil
+	case types.AccessListTxType:
+		return types.NewTx(&types.AccessListTx{
+			ChainID:    tx.ChainId(),
+			Nonce:      tx.Nonce(),
+			GasPrice:   tx.GasPrice(),
+			Gas:        intrinsic,
+			To:         tx.To(),
+			Value:      tx.Value(),
+			Data:       append([]byte(nil), tx.Data()...),
+			AccessList: append(types.AccessList(nil), tx.AccessList()...),
+		}), nil
+	case types.DynamicFeeTxType:
+		return types.NewTx(&types.DynamicFeeTx{
+			ChainID:    tx.ChainId(),
+			Nonce:      tx.Nonce(),
+			GasTipCap:  tx.GasTipCap(),
+			GasFeeCap:  tx.GasFeeCap(),
+			Gas:        intrinsic,
+			To:         tx.To(),
+			Value:      tx.Value(),
+			Data:       append([]byte(nil), tx.Data()...),
+			AccessList: append(types.AccessList(nil), tx.AccessList()...),
+		}), nil
+	default:
+		return tx, nil
+	}
 }
 
 func newALTx(nonce uint64, to *common.Address, gasLimit uint64, chainID, gasPrice, value *big.Int, code []byte, al types.AccessList) *types.Transaction {

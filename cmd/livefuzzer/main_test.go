@@ -75,3 +75,33 @@ func TestCampaignCommandRegistersAllFamilies(t *testing.T) {
 	}
 	t.Fatal("campaign command not found")
 }
+
+func TestCampaignCommandRegistersD1ExecutionFlags(t *testing.T) {
+	app := initApp()
+	for _, cmd := range app.Commands {
+		if cmd.Name != "campaign" {
+			continue
+		}
+		for _, sub := range cmd.Subcommands {
+			if sub.Name != "basic" {
+				continue
+			}
+			seen := map[string]bool{}
+			for _, flag := range sub.Flags {
+				seen[flag.Names()[0]] = true
+			}
+			for _, want := range []string{
+				flags.ExecutionModeFlag.Name,
+				flags.MaxInFlightFlag.Name,
+				flags.ConfirmSLAFlag.Name,
+				flags.ConfirmDrainTimeoutFlag.Name,
+			} {
+				if !seen[want] {
+					t.Fatalf("basic campaign missing %s flag: %#v", want, seen)
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("campaign basic command not found")
+}

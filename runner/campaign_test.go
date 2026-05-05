@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"fmt"
-	"slices"
 	"testing"
 	"time"
 
@@ -66,9 +65,13 @@ func (b orderedBuilder) Build(_ context.Context, sequence int) (*Case, error) {
 type orderedAsyncSubmitter struct {
 	events   *[]string
 	release1 chan struct{}
+	submits  int
+	asyncs   int
 }
 
-func (s orderedAsyncSubmitter) Submit(ctx context.Context, c *Case) (feedback.Record, error) {
+func (s *orderedAsyncSubmitter) Submit(ctx context.Context, c *Case) (feedback.Record, error) {
+	s.submits++
+	*s.events = append(*s.events, fmt.Sprintf("legacy-submit-%d", c.Record.Sequence))
 	pending, err := s.SubmitAsync(ctx, c)
 	if err != nil {
 		return feedback.Record{}, err
@@ -84,7 +87,8 @@ func (p orderedPending) Await(context.Context) (feedback.Record, error) {
 	return <-p.recordCh, nil
 }
 
-func (s orderedAsyncSubmitter) SubmitAsync(_ context.Context, c *Case) (PendingSubmission, error) {
+func (s *orderedAsyncSubmitter) SubmitAsync(_ context.Context, c *Case) (PendingSubmission, error) {
+	s.asyncs++
 	*s.events = append(*s.events, fmt.Sprintf("submit-%d", c.Record.Sequence))
 	recordCh := make(chan feedback.Record, 1)
 	go func() {
@@ -113,9 +117,10 @@ func (s orderedSink) Accept(_ context.Context, outcome Outcome) (SinkResult, err
 	return SinkResult{}, nil
 }
 
-func TestRunCampaignPrebuildsNextCaseBeforeFirstFinalizeButDelaysSinkUntilFinalized(t *testing.T) {
+func TestRunCampaignKeepsLegacySequentialSubmitContractEvenWhenSubmitterSupportsAsync(t *testing.T) {
 	var events []string
 	release1 := make(chan struct{})
+	submitter := &orderedAsyncSubmitter{events: &events, release1: release1}
 	done := make(chan struct{})
 	var (
 		stats Stats
@@ -127,24 +132,13 @@ func TestRunCampaignPrebuildsNextCaseBeforeFirstFinalizeButDelaysSinkUntilFinali
 			Cases:      2,
 			TxFamily:   "basic",
 			ForkLabel:  "cancun",
-		}, orderedBuilder{events: &events}, orderedAsyncSubmitter{events: &events, release1: release1}, orderedSink{events: &events})
+		}, orderedBuilder{events: &events}, submitter, orderedSink{events: &events})
 		close(done)
 	}()
 
-	deadline := time.After(time.Second)
-	for {
-		if slices.Contains(events, "build-2") {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("runner did not prebuild second case before finalize; events=%v", events)
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	if slices.Contains(events, "sink-1-sent") {
-		t.Fatalf("sink should not run before first case finalizes; events=%v", events)
+	time.Sleep(100 * time.Millisecond)
+	if contains(events, "build-2") || contains(events, "submit-2") || contains(events, "legacy-submit-2") {
+		t.Fatalf("legacy runner should not advance to second case before first finalize; events=%v", events)
 	}
 
 	close(release1)
@@ -160,10 +154,26 @@ func TestRunCampaignPrebuildsNextCaseBeforeFirstFinalizeButDelaysSinkUntilFinali
 	if stats.TotalCases != 2 || stats.SentCases != 2 {
 		t.Fatalf("unexpected stats: %#v events=%v", stats, events)
 	}
-	if !slices.Contains(events, "finalize-1") || !slices.Contains(events, "sink-1-sent") {
-		t.Fatalf("missing finalize/sink events: %v", events)
+	if submitter.submits != 2 || submitter.asyncs != 2 {
+		t.Fatalf("legacy runner should route through Submit for each case; submits=%d asyncs=%d events=%v", submitter.submits, submitter.asyncs, events)
 	}
-	if slices.Index(events, "sink-1-sent") < slices.Index(events, "finalize-1") {
-		t.Fatalf("sink observed case 1 before finalize: %v", events)
+	if !contains(events, "finalize-1") || !contains(events, "legacy-submit-2") || !contains(events, "build-2") {
+		t.Fatalf("legacy runner did not finish sequential progression as expected: %v", events)
 	}
+	if indexOf(events, "build-2") < indexOf(events, "finalize-1") {
+		t.Fatalf("legacy runner advanced to build-2 before finalize-1; events=%v", events)
+	}
+}
+
+func contains(events []string, want string) bool {
+	return indexOf(events, want) >= 0
+}
+
+func indexOf(events []string, want string) int {
+	for i, event := range events {
+		if event == want {
+			return i
+		}
+	}
+	return -1
 }

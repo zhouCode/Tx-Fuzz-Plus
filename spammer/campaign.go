@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -45,7 +46,16 @@ type CampaignOptions struct {
 	RPCLabel       string
 	RetainPerSig   int
 	ReceiptTimeout time.Duration
+	ExecutionMode  string
+	MaxInFlight    int
+	ConfirmSLA     time.Duration
+	ConfirmDrain   time.Duration
 }
+
+const (
+	CampaignExecutionModeLegacy       = "legacy"
+	CampaignExecutionModeV2SingleLane = "v2-single-lane"
+)
 
 func RunBasicCampaignFromContext(c *cli.Context) error {
 	return RunCampaignFamilyFromContext(c, "basic")
@@ -79,7 +89,11 @@ func campaignOptionsFromContext(c *cli.Context, family string) CampaignOptions {
 		ReportJSON:     stringFlagValue(c, flags.ReportJSONFlag),
 		RPCLabel:       stringFlagValue(c, flags.RpcLabelFlag),
 		RetainPerSig:   intFlagValue(c, flags.RetainPerSigFlag),
-		ReceiptTimeout: 2 * time.Second,
+		ReceiptTimeout: c.Duration(flags.ReceiptTimeoutFlag.Name),
+		ExecutionMode:  stringFlagValue(c, flags.ExecutionModeFlag),
+		MaxInFlight:    intFlagValue(c, flags.MaxInFlightFlag),
+		ConfirmSLA:     c.Duration(flags.ConfirmSLAFlag.Name),
+		ConfirmDrain:   c.Duration(flags.ConfirmDrainTimeoutFlag.Name),
 	}
 }
 
@@ -121,11 +135,27 @@ func normalizeCampaignOptions(opts CampaignOptions) CampaignOptions {
 	if opts.RPCLabel == "" {
 		opts.RPCLabel = "default-rpc"
 	}
-	if opts.ReceiptTimeout <= 0 {
-		opts.ReceiptTimeout = 2 * time.Second
-	}
 	if opts.RetainPerSig <= 0 {
 		opts.RetainPerSig = 1
+	}
+	if opts.ExecutionMode == "" {
+		opts.ExecutionMode = CampaignExecutionModeLegacy
+	}
+	if opts.MaxInFlight <= 0 {
+		opts.MaxInFlight = 8
+	}
+	if opts.ConfirmSLA <= 0 {
+		opts.ConfirmSLA = 2 * time.Second
+	}
+	if opts.ConfirmDrain <= 0 {
+		opts.ConfirmDrain = 5 * time.Second
+	}
+	if opts.ReceiptTimeout <= 0 {
+		if opts.ExecutionMode == CampaignExecutionModeV2SingleLane {
+			opts.ReceiptTimeout = opts.ConfirmDrain
+		} else {
+			opts.ReceiptTimeout = 2 * time.Second
+		}
 	}
 	return opts
 }
@@ -139,6 +169,9 @@ func RunBasicCampaign(config *Config, opts CampaignOptions) error {
 
 func RunCampaign(config *Config, opts CampaignOptions) error {
 	opts = normalizeCampaignOptions(opts)
+	if err := validateCampaignExecutionMode(opts); err != nil {
+		return err
+	}
 
 	client := ethclient.NewClient(config.backend)
 	chainID, err := client.ChainID(context.Background())
@@ -158,12 +191,38 @@ func RunCampaign(config *Config, opts CampaignOptions) error {
 		replayDir:    opts.ReplayDir,
 		store:        corpus.NewStore(opts.RetainDir, opts.RetainPerSig),
 	}
-	stats, err := runner.RunCampaign(context.Background(), runner.Config{
+	runnerConfig := runner.Config{
 		CampaignID: opts.CampaignID,
 		Cases:      opts.Cases,
 		TxFamily:   opts.TxFamily,
 		ForkLabel:  opts.ForkLabel,
-	}, builder, submitter, sink)
+	}
+	if opts.ExecutionMode == CampaignExecutionModeV2SingleLane {
+		eventLog := runner.NewEventLog(opts.ArtifactRoot)
+		var report runner.ReportV2
+		stats, err := runner.RunCampaignV2(context.Background(), runnerConfig, builder, submitter, sink, runner.V2Options{
+			MaxInFlight:      opts.MaxInFlight,
+			ConfirmSLA:       opts.ConfirmSLA,
+			ConfirmDrain:     opts.ConfirmDrain,
+			ReceiptTimeout:   opts.ReceiptTimeout,
+			EventLog:         eventLog,
+			Report:           &report,
+			LaneID:           "lane-0",
+			RPCLabel:         opts.RPCLabel,
+			SendArchitecture: opts.ExecutionMode,
+		})
+		if err != nil {
+			return err
+		}
+		report.CampaignID = stats.CampaignID
+		report.TxFamily = stats.TxFamily
+		report.TotalCases = stats.TotalCases
+		report.SentCases = stats.SentCases
+		report.RetainedCases = stats.RetainedCases
+		report.DuplicateCases = stats.DuplicateCases
+		return runner.WriteReportV2(opts.ReportJSON, report)
+	}
+	stats, err := runner.RunCampaign(context.Background(), runnerConfig, builder, submitter, sink)
 	if err != nil {
 		return err
 	}
@@ -236,6 +295,9 @@ func buildCampaignTx(ctx context.Context, config *Config, client *ethclient.Clie
 	switch family {
 	case "", "basic":
 		tx, err := txfuzz.RandomValidTx(config.backend, fill, sender, nonce, nil, nil, config.accessList)
+		if err == nil {
+			err = ensureIntrinsicGasFloor(tx)
+		}
 		return tx, nil, types.NewCancunSigner(chainID), "basic", err
 	case "blob":
 		tx, err := txfuzz.RandomBlobTx(config.backend, fill, sender, nonce, nil, nil, config.accessList)
@@ -250,6 +312,54 @@ func buildCampaignTx(ctx context.Context, config *Config, client *ethclient.Clie
 	default:
 		return nil, nil, nil, family, fmt.Errorf("unsupported campaign tx family: %s", family)
 	}
+}
+
+func ensureIntrinsicGasFloor(tx *types.Transaction) error {
+	if tx == nil {
+		return nil
+	}
+	intrinsic, err := core.IntrinsicGas(tx.Data(), tx.AccessList(), tx.SetCodeAuthorizations(), tx.To() == nil, true, true, true)
+	if err != nil {
+		return err
+	}
+	if tx.Gas() >= intrinsic {
+		return nil
+	}
+	switch tx.Type() {
+	case types.LegacyTxType:
+		*tx = *types.NewTx(&types.LegacyTx{
+			Nonce:    tx.Nonce(),
+			To:       tx.To(),
+			Value:    tx.Value(),
+			Gas:      intrinsic,
+			GasPrice: tx.GasPrice(),
+			Data:     append([]byte(nil), tx.Data()...),
+		})
+	case types.AccessListTxType:
+		*tx = *types.NewTx(&types.AccessListTx{
+			ChainID:    tx.ChainId(),
+			Nonce:      tx.Nonce(),
+			GasPrice:   tx.GasPrice(),
+			Gas:        intrinsic,
+			To:         tx.To(),
+			Value:      tx.Value(),
+			Data:       append([]byte(nil), tx.Data()...),
+			AccessList: append(types.AccessList(nil), tx.AccessList()...),
+		})
+	case types.DynamicFeeTxType:
+		*tx = *types.NewTx(&types.DynamicFeeTx{
+			ChainID:    tx.ChainId(),
+			Nonce:      tx.Nonce(),
+			GasTipCap:  tx.GasTipCap(),
+			GasFeeCap:  tx.GasFeeCap(),
+			Gas:        intrinsic,
+			To:         tx.To(),
+			Value:      tx.Value(),
+			Data:       append([]byte(nil), tx.Data()...),
+			AccessList: append(types.AccessList(nil), tx.AccessList()...),
+		})
+	}
+	return nil
 }
 
 func buildSetCodeAuthorizations(ctx context.Context, config *Config, chainID *big.Int, sender common.Address, sequence int, lane *runner.Lane) ([]types.SetCodeAuthorization, error) {
@@ -312,7 +422,34 @@ func (s *campaignSubmitter) Submit(ctx context.Context, c *runner.Case) (feedbac
 	if err != nil {
 		return feedback.Record{}, err
 	}
-	return pending.Await(ctx)
+	record, err := pending.Await(ctx)
+	if err != nil {
+		return feedback.Record{}, err
+	}
+	if record.SendStatus != "sent" {
+		return record, nil
+	}
+	if err := s.appendEvent(c.Record, record, "submitted"); err != nil {
+		return feedback.Record{}, err
+	}
+	receiptCtx, cancel := context.WithTimeout(context.Background(), s.receiptTimeout)
+	defer cancel()
+	finalized, err := s.AwaitReceipt(receiptCtx, c)
+	if err != nil {
+		return feedback.Record{}, err
+	}
+	record.ReceiptObserved = finalized.ReceiptObserved
+	record.ReceiptStatus = finalized.ReceiptStatus
+	record.ReceiptGasUsed = finalized.ReceiptGasUsed
+	record.ReceiptBlockNumber = finalized.ReceiptBlockNumber
+	record.InclusionLatencyMS = finalized.InclusionLatencyMS
+	record.ExecutionBucket = finalized.ExecutionBucket
+	record.AnomalyFlags = append(record.AnomalyFlags, finalized.AnomalyFlags...)
+	record.ProcessSignals = finalized.ProcessSignals
+	if err := s.appendEvent(c.Record, record, "finalized"); err != nil {
+		return feedback.Record{}, err
+	}
+	return record, nil
 }
 
 type pendingCampaignSubmission struct {
@@ -342,6 +479,7 @@ func (s *campaignSubmitter) SubmitAsync(ctx context.Context, c *runner.Case) (ru
 	record := feedback.Record{
 		CaseID:          c.Record.CaseID,
 		RPCLabel:        s.rpcLabel,
+		LaneID:          c.Record.LaneID,
 		SubmitStartedAt: start,
 	}
 	if c.Tx == nil {
@@ -367,48 +505,8 @@ func (s *campaignSubmitter) SubmitAsync(ctx context.Context, c *runner.Case) (ru
 	}
 	record.SubmitLatencyMS = time.Since(start).Milliseconds()
 	record.SendStatus = "sent"
-	if err := s.appendEvent(c.Record, record, "submitted"); err != nil {
-		s.releaseLane()
-		return nil, err
-	}
-	recordCh := make(chan feedback.Record, 1)
-	errCh := make(chan error, 1)
-	go func(base feedback.Record) {
-		defer s.releaseLane()
-		receiptCtx, cancel := context.WithTimeout(context.Background(), s.receiptTimeout)
-		defer cancel()
-		receipt, err := s.waitForMined(receiptCtx, c.Tx)
-		if err != nil {
-			if receiptCtx.Err() != nil {
-				base.AnomalyFlags = append(base.AnomalyFlags, "receipt_timeout")
-				_ = s.appendEvent(c.Record, base, "finalized")
-				recordCh <- base
-				return
-			}
-			base.AnomalyFlags = append(base.AnomalyFlags, "receipt_lookup_failed")
-			base.ProcessSignals.StderrHints = append(base.ProcessSignals.StderrHints, err.Error())
-			_ = s.appendEvent(c.Record, base, "finalized")
-			recordCh <- base
-			return
-		}
-		if receipt != nil {
-			status := receipt.Status
-			gasUsed := receipt.GasUsed
-			latency := time.Since(start).Milliseconds()
-			base.ReceiptObserved = true
-			base.ReceiptStatus = &status
-			base.ReceiptGasUsed = &gasUsed
-			base.InclusionLatencyMS = &latency
-			if status == types.ReceiptStatusSuccessful {
-				base.ExecutionBucket = "success"
-			} else {
-				base.ExecutionBucket = "reverted"
-			}
-		}
-		_ = s.appendEvent(c.Record, base, "finalized")
-		recordCh <- base
-	}(record)
-	return &pendingCampaignSubmission{recordCh: recordCh, errCh: errCh}, nil
+	s.releaseLane()
+	return completedPendingSubmission(record), nil
 }
 
 func completedPendingSubmission(record feedback.Record) runner.PendingSubmission {
@@ -449,6 +547,48 @@ func (s *campaignSubmitter) waitForMined(ctx context.Context, tx *types.Transact
 	return bind.WaitMined(ctx, s.client, tx)
 }
 
+func (s *campaignSubmitter) AwaitReceipt(ctx context.Context, c *runner.Case) (feedback.Record, error) {
+	start := time.Now().UTC()
+	record := feedback.Record{
+		CaseID:          c.Record.CaseID,
+		RPCLabel:        s.rpcLabel,
+		LaneID:          c.Record.LaneID,
+		SubmitStartedAt: start,
+		SendStatus:      "sent",
+		SendState:       "sent",
+	}
+	receipt, err := s.waitForMined(ctx, c.Tx)
+	record.SubmitLatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		if ctx.Err() != nil {
+			record.AnomalyFlags = append(record.AnomalyFlags, "receipt_timeout")
+			return record, nil
+		}
+		record.AnomalyFlags = append(record.AnomalyFlags, "receipt_lookup_failed")
+		record.ProcessSignals.StderrHints = append(record.ProcessSignals.StderrHints, err.Error())
+		return record, nil
+	}
+	if receipt != nil {
+		status := receipt.Status
+		gasUsed := receipt.GasUsed
+		latency := time.Since(start).Milliseconds()
+		record.ReceiptObserved = true
+		record.ReceiptStatus = &status
+		record.ReceiptGasUsed = &gasUsed
+		record.InclusionLatencyMS = &latency
+		if receipt.BlockNumber != nil {
+			blockNumber := receipt.BlockNumber.Uint64()
+			record.ReceiptBlockNumber = &blockNumber
+		}
+		if status == types.ReceiptStatusSuccessful {
+			record.ExecutionBucket = "success"
+		} else {
+			record.ExecutionBucket = "reverted"
+		}
+	}
+	return record, nil
+}
+
 func (s *campaignSubmitter) appendEvent(record runner.TestcaseRecord, fb feedback.Record, stage string) error {
 	if strings.TrimSpace(s.artifactRoot) == "" {
 		return nil
@@ -481,6 +621,20 @@ func (s *campaignSubmitter) appendEvent(record runner.TestcaseRecord, fb feedbac
 		return err
 	}
 	return writer.Flush()
+}
+
+func validateCampaignExecutionMode(opts CampaignOptions) error {
+	switch opts.ExecutionMode {
+	case CampaignExecutionModeLegacy:
+		return nil
+	case CampaignExecutionModeV2SingleLane:
+		if opts.TxFamily != "basic" {
+			return fmt.Errorf("execution mode %s is only supported for campaign basic during Phase D1", opts.ExecutionMode)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported execution mode: %s", opts.ExecutionMode)
+	}
 }
 
 type campaignSink struct {

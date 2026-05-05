@@ -113,6 +113,10 @@ type AsyncSubmitter interface {
 	SubmitAsync(context.Context, *Case) (PendingSubmission, error)
 }
 
+type ReceiptAwaiter interface {
+	AwaitReceipt(context.Context, *Case) (feedback.Record, error)
+}
+
 type SinkResult struct {
 	Retained  bool
 	Duplicate bool
@@ -124,60 +128,20 @@ type Sink interface {
 
 func RunCampaign(ctx context.Context, cfg Config, builder Builder, submitter Submitter, sink Sink) (Stats, error) {
 	stats := Stats{CampaignID: cfg.CampaignID, TxFamily: cfg.TxFamily}
-	asyncSubmitter, async := submitter.(AsyncSubmitter)
-	if !async {
-		for i := 1; i <= cfg.Cases; i++ {
-			stats.TotalCases++
-			c, err := builder.Build(ctx, i)
-			if err != nil {
-				return stats, err
-			}
-			normalizeCaseFromConfig(c, cfg, i)
-			rec, err := submitter.Submit(ctx, c)
-			if err != nil {
-				return stats, err
-			}
-			if err := acceptOutcome(ctx, c.Record, rec, sink, &stats); err != nil {
-				return stats, err
-			}
-		}
-		return stats, nil
-	}
-
-	var (
-		current *Case
-		err     error
-	)
-	if cfg.Cases <= 0 {
-		return stats, nil
-	}
-	current, err = builder.Build(ctx, 1)
-	if err != nil {
-		return stats, err
-	}
-	normalizeCaseFromConfig(current, cfg, 1)
 	for i := 1; i <= cfg.Cases; i++ {
 		stats.TotalCases++
-		pending, err := asyncSubmitter.SubmitAsync(ctx, current)
+		c, err := builder.Build(ctx, i)
 		if err != nil {
 			return stats, err
 		}
-		var next *Case
-		if i < cfg.Cases {
-			next, err = builder.Build(ctx, i+1)
-			if err != nil {
-				return stats, err
-			}
-			normalizeCaseFromConfig(next, cfg, i+1)
-		}
-		rec, err := pending.Await(ctx)
+		normalizeCaseFromConfig(c, cfg, i)
+		rec, err := submitter.Submit(ctx, c)
 		if err != nil {
 			return stats, err
 		}
-		if err := acceptOutcome(ctx, current.Record, rec, sink, &stats); err != nil {
+		if err := acceptOutcome(ctx, c.Record, rec, sink, &stats); err != nil {
 			return stats, err
 		}
-		current = next
 	}
 	return stats, nil
 }

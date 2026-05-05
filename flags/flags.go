@@ -128,6 +128,36 @@ var (
 		Value:   1,
 	}
 
+	ExecutionModeFlag = &cli.StringFlag{
+		Name:  "execution-mode",
+		Usage: "Campaign execution mode: legacy or v2-single-lane",
+		Value: "legacy",
+	}
+
+	MaxInFlightFlag = &cli.IntFlag{
+		Name:  "max-inflight",
+		Usage: "Maximum in-flight transactions allowed in v2 single-lane campaign mode",
+		Value: 8,
+	}
+
+	ConfirmSLAFlag = &cli.DurationFlag{
+		Name:  "confirm-sla",
+		Usage: "Soft deadline before a sent transaction is marked sla_breached_pending in v2 mode",
+		Value: 2_000_000_000,
+	}
+
+	ConfirmDrainTimeoutFlag = &cli.DurationFlag{
+		Name:  "confirm-drain-timeout",
+		Usage: "Maximum time to wait for confirmation drain before unresolved_shutdown classification in v2 mode",
+		Value: 5_000_000_000,
+	}
+
+	ReceiptTimeoutFlag = &cli.DurationFlag{
+		Name:  "receipt-timeout",
+		Usage: "Per-transaction receipt wait budget; in v2 mode this is capped by confirm-drain-timeout and defaults to that value when unset",
+		Value: 2_000_000_000,
+	}
+
 	BundleFlag = &cli.StringFlag{
 		Name:     "bundle",
 		Usage:    "Replay bundle JSON file",
@@ -170,5 +200,10 @@ var (
 		ReplayDirFlag,
 		ReportJSONFlag,
 		RetainPerSigFlag,
+		ExecutionModeFlag,
+		MaxInFlightFlag,
+		ConfirmSLAFlag,
+		ConfirmDrainTimeoutFlag,
+		ReceiptTimeoutFlag,
 	}
 )

@@ -1,9 +1,13 @@
 cmd/eip4399/eip4399
 cmd/livefuzzer/livefuzzer
+cmd/cancun/cancun
+cmd/london/london
+cmd/prague/prague
 cmd/shanghai/shanghai
-.idea
+.idea/
 AGENTS.md
-.omx
-livefuzzer
+.omx/
+/livefuzzer
 /upgradePlan
 .local/
+.txfuzz/

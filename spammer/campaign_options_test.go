@@ -2,6 +2,7 @@ package spammer
 
 import (
 	stdflag "flag"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,9 @@ func TestCampaignOptionsFromContextPreservesSharedCampaignSurface(t *testing.T) 
 	if opts.RetainPerSig != 3 || opts.ReceiptTimeout != 2*time.Second {
 		t.Fatalf("unexpected retention/timeout wiring: %#v", opts)
 	}
+	if opts.ExecutionMode != "legacy" || opts.MaxInFlight != 8 || opts.ConfirmSLA != 2*time.Second || opts.ConfirmDrain != 5*time.Second {
+		t.Fatalf("unexpected d1 execution defaults: %#v", opts)
+	}
 }
 
 func TestNormalizeCampaignOptionsDefaultsKeepFamilyCompatibility(t *testing.T) {
@@ -58,6 +62,9 @@ func TestNormalizeCampaignOptionsDefaultsKeepFamilyCompatibility(t *testing.T) {
 	}
 	if basic.RPCLabel != "default-rpc" || basic.RetainPerSig != 1 || basic.ReceiptTimeout != 2*time.Second {
 		t.Fatalf("unexpected basic service defaults: %#v", basic)
+	}
+	if basic.ExecutionMode != "legacy" || basic.MaxInFlight != 8 || basic.ConfirmSLA != 2*time.Second || basic.ConfirmDrain != 5*time.Second {
+		t.Fatalf("unexpected basic v2 defaults: %#v", basic)
 	}
 
 	blob := normalizeCampaignOptions(CampaignOptions{TxFamily: "blob"})
@@ -73,5 +80,45 @@ func TestNormalizeCampaignOptionsDefaultsKeepFamilyCompatibility(t *testing.T) {
 	explicit := normalizeCampaignOptions(CampaignOptions{TxFamily: "pectra", ForkLabel: "override", Cases: 9, RPCLabel: "rpc-z", RetainPerSig: 4, ReceiptTimeout: 5 * time.Second})
 	if explicit.ForkLabel != "override" || explicit.Cases != 9 || explicit.RPCLabel != "rpc-z" || explicit.RetainPerSig != 4 || explicit.ReceiptTimeout != 5*time.Second {
 		t.Fatalf("explicit values should win: %#v", explicit)
+	}
+}
+
+func TestCampaignOptionsFromContextParsesD1ExecutionControls(t *testing.T) {
+	ctx := newCampaignTestContext(t,
+		"--execution-mode", "v2-single-lane",
+		"--max-inflight", "17",
+		"--confirm-sla", "9s",
+		"--confirm-drain-timeout", "13s",
+		"--receipt-timeout", "11s",
+	)
+
+	opts := campaignOptionsFromContext(ctx, "basic")
+	if opts.ExecutionMode != "v2-single-lane" {
+		t.Fatalf("unexpected execution mode: %#v", opts)
+	}
+	if opts.MaxInFlight != 17 || opts.ConfirmSLA != 9*time.Second || opts.ConfirmDrain != 13*time.Second || opts.ReceiptTimeout != 11*time.Second {
+		t.Fatalf("unexpected execution controls: %#v", opts)
+	}
+}
+
+func TestNormalizeCampaignOptionsV2ReceiptTimeoutDefaultsToConfirmDrain(t *testing.T) {
+	opts := normalizeCampaignOptions(CampaignOptions{
+		ExecutionMode: CampaignExecutionModeV2SingleLane,
+		ConfirmDrain:  13 * time.Second,
+	})
+	if opts.ReceiptTimeout != 13*time.Second {
+		t.Fatalf("receipt timeout should default to confirm drain in v2: %#v", opts)
+	}
+}
+
+func TestValidateCampaignExecutionModeRestrictsV2ToBasic(t *testing.T) {
+	if err := validateCampaignExecutionMode(CampaignOptions{TxFamily: "basic", ExecutionMode: CampaignExecutionModeV2SingleLane}); err != nil {
+		t.Fatalf("basic should allow v2-single-lane: %v", err)
+	}
+	for _, family := range []string{"blob", "pectra"} {
+		err := validateCampaignExecutionMode(CampaignOptions{TxFamily: family, ExecutionMode: CampaignExecutionModeV2SingleLane})
+		if err == nil || !strings.Contains(err.Error(), "only supported for campaign basic") {
+			t.Fatalf("%s should reject v2-single-lane, got err=%v", family, err)
+		}
 	}
 }
