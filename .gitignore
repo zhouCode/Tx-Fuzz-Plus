@@ -8,6 +8,5 @@ cmd/shanghai/shanghai
 AGENTS.md
 .omx/
 /livefuzzer
-/upgradePlan
 .local/
 .txfuzz/
