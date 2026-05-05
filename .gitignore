@@ -10,3 +10,5 @@ AGENTS.md
 /livefuzzer
 .local/
 .txfuzz/
+
+/upgradePlan
